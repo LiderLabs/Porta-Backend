@@ -1,0 +1,17 @@
+{
+  "name": "prota-backend",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "npx convex dev",
+    "deploy": "npx convex deploy"
+  },
+  "dependencies": {
+    "@convex-dev/auth": "^0.0.92",
+    "convex": "^1.37.0",
+    "svix": "^1.92.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.2"
+  }
+}
