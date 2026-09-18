@@ -31,3 +31,5 @@ Thumbs.db
 # Testing
 coverage/
 .nyc_output/
+
+CLERK_JWT_ISSUER_DOMAIN=https://example.clerk.accounts.dev

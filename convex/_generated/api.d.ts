@@ -21,8 +21,6 @@ import type * as getOrgId from "../getOrgId.js";
 import type * as http from "../http.js";
 import type * as invites from "../invites.js";
 import type * as messages from "../messages.js";
-import type * as migration from "../migration.js";
-import type * as migrations from "../migrations.js";
 import type * as notifications from "../notifications.js";
 import type * as orgSettings from "../orgSettings.js";
 import type * as paAssignments from "../paAssignments.js";
@@ -55,8 +53,6 @@ declare const fullApi: ApiFromModules<{
   http: typeof http;
   invites: typeof invites;
   messages: typeof messages;
-  migration: typeof migration;
-  migrations: typeof migrations;
   notifications: typeof notifications;
   orgSettings: typeof orgSettings;
   paAssignments: typeof paAssignments;
