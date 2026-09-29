@@ -125,14 +125,14 @@ async function requireAdminOrReceptionistInternal(ctx: QueryCtx | MutationCtx): 
 
 export async function requireAdmin(ctx: QueryCtx | MutationCtx | ActionCtx): Promise<AuthResult> {
   if ("runQuery" in ctx && !("db" in ctx)) {
-    return await (ctx as ActionCtx).runQuery((internal as any).authHelpers.checkAdminQuery);
+    return await (ctx as ActionCtx).runQuery(internal.authHelpers.checkAdminQuery);
   }
   return await requireAdminInternal(ctx as QueryCtx | MutationCtx);
 }
 
 export async function requireAdminOrReceptionist(ctx: QueryCtx | MutationCtx | ActionCtx): Promise<AuthResult> {
   if ("runQuery" in ctx && !("db" in ctx)) {
-    return await (ctx as ActionCtx).runQuery((internal as any).authHelpers.checkAdminOrReceptionistQuery);
+    return await (ctx as ActionCtx).runQuery(internal.authHelpers.checkAdminOrReceptionistQuery);
   }
   return await requireAdminOrReceptionistInternal(ctx as QueryCtx | MutationCtx);
 }
