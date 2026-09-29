@@ -9,6 +9,7 @@
  */
 
 import type * as analytics from "../analytics.js";
+import type * as authHelpers from "../authHelpers.js";
 import type * as blacklist from "../blacklist.js";
 import type * as bookingRules from "../bookingRules.js";
 import type * as checkInSettings from "../checkInSettings.js";
@@ -41,6 +42,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   analytics: typeof analytics;
+  authHelpers: typeof authHelpers;
   blacklist: typeof blacklist;
   bookingRules: typeof bookingRules;
   checkInSettings: typeof checkInSettings;
