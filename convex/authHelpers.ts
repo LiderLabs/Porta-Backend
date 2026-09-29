@@ -1,7 +1,31 @@
-import { QueryCtx, MutationCtx } from "./_generated/server";
+import { QueryCtx, MutationCtx, ActionCtx, internalQuery } from "./_generated/server";
+import { internal } from "./_generated/api";
 import { resolveOrgId } from "./getOrgId";
+import type { UserIdentity } from "convex/server";
+import type { Doc } from "./_generated/dataModel";
 
-export async function requireAdmin(ctx: QueryCtx | MutationCtx) {
+export interface AuthResult {
+  identity: UserIdentity;
+  orgId: string;
+  staff: Doc<"staff"> | null;
+  role: string | undefined;
+}
+
+export const checkAdminQuery = internalQuery({
+  args: {},
+  handler: async (ctx): Promise<AuthResult> => {
+    return await requireAdminInternal(ctx);
+  },
+});
+
+export const checkAdminOrReceptionistQuery = internalQuery({
+  args: {},
+  handler: async (ctx): Promise<AuthResult> => {
+    return await requireAdminOrReceptionistInternal(ctx);
+  },
+});
+
+async function requireAdminInternal(ctx: QueryCtx | MutationCtx): Promise<AuthResult> {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) {
     throw new Error("Not authenticated");
@@ -50,7 +74,7 @@ export async function requireAdmin(ctx: QueryCtx | MutationCtx) {
   return { identity, orgId, staff, role };
 }
 
-export async function requireAdminOrReceptionist(ctx: QueryCtx | MutationCtx) {
+async function requireAdminOrReceptionistInternal(ctx: QueryCtx | MutationCtx): Promise<AuthResult> {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) {
     throw new Error("Not authenticated");
@@ -97,6 +121,20 @@ export async function requireAdminOrReceptionist(ctx: QueryCtx | MutationCtx) {
   }
 
   return { identity, orgId, staff, role };
+}
+
+export async function requireAdmin(ctx: QueryCtx | MutationCtx | ActionCtx): Promise<AuthResult> {
+  if ("runQuery" in ctx && !("db" in ctx)) {
+    return await (ctx as ActionCtx).runQuery(internal.authHelpers.checkAdminQuery);
+  }
+  return await requireAdminInternal(ctx as QueryCtx | MutationCtx);
+}
+
+export async function requireAdminOrReceptionist(ctx: QueryCtx | MutationCtx | ActionCtx): Promise<AuthResult> {
+  if ("runQuery" in ctx && !("db" in ctx)) {
+    return await (ctx as ActionCtx).runQuery(internal.authHelpers.checkAdminOrReceptionistQuery);
+  }
+  return await requireAdminOrReceptionistInternal(ctx as QueryCtx | MutationCtx);
 }
 
 export function assertSameOrg(callerOrgId: string | undefined | null, recordOrgId: string | undefined | null) {

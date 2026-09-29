@@ -147,7 +147,7 @@ export const updateRole = mutation({
   handler: async (ctx, { staffId, role }) => {
     const { identity, orgId } = await requireAdmin(ctx);
     const record = await ctx.db.get(staffId);
-    if (!record) return;
+    if (!record) throw new Error("Staff member not found");
     assertSameOrg(orgId, record.orgId);
     if (record.clerkUserId === identity.subject)
       throw new Error("You can't change your own role");

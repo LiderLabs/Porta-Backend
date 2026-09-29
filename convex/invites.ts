@@ -2,6 +2,7 @@ import { resolveOrgId } from "./getOrgId";
 import { query, mutation, action, internalMutation } from "./_generated/server";
 import { v } from "convex/values";
 import { api, internal } from "./_generated/api";
+import { requireAdmin } from "./authHelpers";
 
 const STAFF_ROLES = ["receptionist", "employee", "dept_head", "pa"] as const;
 const ADMIN_ROLES = ["admin"] as const;
@@ -88,6 +89,7 @@ export const sendInvite = action({
     orgId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    await requireAdmin(ctx);
     const clerkSecretKey = process.env.CLERK_SECRET_KEY;
     if (!clerkSecretKey) throw new Error("Missing CLERK_SECRET_KEY");
 
