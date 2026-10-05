@@ -122,9 +122,11 @@ export default defineSchema({
     addedByName:    v.string(),
     active:         v.boolean(),
     createdAt:      v.number(),
+    orgId:          v.optional(v.string()),
   })
     .index("by_email",  ["email"])
-    .index("by_active", ["active"]),
+    .index("by_active", ["active"])
+    .index("by_org",    ["orgId"]),
 
   planDefinitions: defineTable({
     planId:      v.string(),
