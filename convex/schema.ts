@@ -1,4 +1,4 @@
-﻿import { defineSchema, defineTable } from "convex/server";
+import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
 export const VISIT_STATUS = v.union(
@@ -193,9 +193,11 @@ export default defineSchema({
     checkOutTime: v.optional(v.number()),
     status:       v.union(v.literal("IN"), v.literal("OUT")),
     scheduledVisitId: v.optional(v.id("scheduledVisits")),
+    orgId:        v.optional(v.string()),
   })
     .index("by_status",      ["status"])
-    .index("by_checkInTime", ["checkInTime"]),
+    .index("by_checkInTime", ["checkInTime"])
+    .index("by_org",         ["orgId"]),
 
   scheduledVisits: defineTable({
     visitorName:     v.string(),
