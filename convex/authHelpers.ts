@@ -142,3 +142,15 @@ export function assertSameOrg(callerOrgId: string | undefined | null, recordOrgI
     throw new Error("Not authorized for this organization");
   }
 }
+
+/**
+ * Identity-match guard. Verifies the authenticated caller IS the person
+ * identified by `clerkUserId`. Use this wherever the check is "are you
+ * the right person?" rather than "do you have the right role?"
+ */
+export async function requireSelf(ctx: QueryCtx | MutationCtx, clerkUserId: string) {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) throw new Error("Not authenticated");
+  if (identity.subject !== clerkUserId) throw new Error("Not authorized");
+  return identity;
+}
