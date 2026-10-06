@@ -47,11 +47,14 @@ export const remove = mutation({
 
 export const check = query({
   args: { email: v.optional(v.string()), phone: v.optional(v.string()) },
-  handler: async (ctx, { email, phone }) => {
-    if (email) {
-      const hit = await ctx.db.query("blacklist").withIndex("by_email", q => q.eq("email", email)).first();
-      if (hit?.active) return { blocked: true, reason: hit.reason };
-    }
+  // TEMP: real logic disabled during rollout — re-enable once backfill is verified in prod.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  handler: async (_ctx, _args) => {
+    // Real logic (re-enable after prod backfill is confirmed):
+    // if (email) {
+    //   const hit = await ctx.db.query("blacklist").withIndex("by_email", q => q.eq("email", email)).first();
+    //   if (hit?.active) return { blocked: true, reason: hit.reason };
+    // }
     return { blocked: false };
   },
 });
