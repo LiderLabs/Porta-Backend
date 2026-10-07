@@ -1,11 +1,21 @@
-﻿import { query, mutation } from "./_generated/server";
+import { query, mutation } from "./_generated/server";
 import { v } from "convex/values";
 import { resolveOrgId } from "./getOrgId";
+import { requireAdminOrReceptionist, assertSameOrg } from "./authHelpers";
 
 export const getTodayStats = query({
   args: {},
   handler: async (ctx) => {
     const orgId = await resolveOrgId(ctx);
+    if (!orgId) {
+      return {
+        totalToday:     0,
+        currentlyIn:    0,
+        checkedOut:     0,
+        totalYesterday: 0,
+      };
+    }
+
     const now = Date.now();
     const startOfDay = new Date(now);
     startOfDay.setUTCHours(0, 0, 0, 0);
@@ -29,11 +39,14 @@ export const getTodayStats = query({
       )
       .collect();
 
+    const filteredToday = todayVisitors.filter((v) => v.orgId === orgId);
+    const filteredYesterday = yesterdayVisitors.filter((v) => v.orgId === orgId);
+
     return {
-      totalToday:     todayVisitors.length,
-      currentlyIn:    todayVisitors.filter((v) => v.status === "IN").length,
-      checkedOut:     todayVisitors.filter((v) => v.status === "OUT").length,
-      totalYesterday: yesterdayVisitors.length,
+      totalToday:     filteredToday.length,
+      currentlyIn:    filteredToday.filter((v) => v.status === "IN").length,
+      checkedOut:     filteredToday.filter((v) => v.status === "OUT").length,
+      totalYesterday: filteredYesterday.length,
     };
   },
 });
@@ -41,11 +54,18 @@ export const getTodayStats = query({
 export const getRecentCheckIns = query({
   args: { limit: v.optional(v.number()) },
   handler: async (ctx, { limit }) => {
-    return await ctx.db
+    const orgId = await resolveOrgId(ctx);
+    if (!orgId) return [];
+
+    const targetLimit = limit ?? 8;
+    const fetchLimit = Math.max(targetLimit * 5, 50);
+    const recent = await ctx.db
       .query("visitors")
       .withIndex("by_checkInTime")
       .order("desc")
-      .take(limit ?? 8);
+      .take(fetchLimit);
+
+    return recent.filter((v) => v.orgId === orgId).slice(0, targetLimit);
   },
 });
 
@@ -53,6 +73,8 @@ export const getTodayScheduled = query({
   args: {},
   handler: async (ctx) => {
     const orgId = await resolveOrgId(ctx);
+    if (!orgId) return [];
+
     const now = Date.now();
     const startOfDay = new Date(now);
     startOfDay.setUTCHours(0, 0, 0, 0);
@@ -64,6 +86,8 @@ export const getTodayScheduled = query({
         q.gte("scheduledDate", startOfDay.getTime()).lte("scheduledDate", endOfDay.getTime())
       )
       .collect();
+
+    return scheduled.filter((v) => v.orgId === orgId);
   },
 });
 
@@ -89,8 +113,10 @@ export const checkIn = mutation({
     idNumber:  v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
     return await ctx.db.insert("visitors", {
       ...args,
+      orgId,
       checkInTime: Date.now(),
       status: "IN",
     });
@@ -100,31 +126,15 @@ export const checkIn = mutation({
 export const checkOut = mutation({
   args: { visitorId: v.id("visitors") },
   handler: async (ctx, { visitorId }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const visitor = await ctx.db.get(visitorId);
+    if (!visitor) throw new Error("Visitor not found");
+    assertSameOrg(orgId, visitor.orgId);
+
     await ctx.db.patch(visitorId, {
       status:       "OUT",
       checkOutTime: Date.now(),
     });
-  },
-});
-
-export const debugAll = query({
-  args: {},
-  handler: async (ctx) => {
-    const all = await ctx.db.query("visitors").collect();
-    const now = Date.now();
-    const startOfDay = new Date(now);
-    startOfDay.setUTCHours(0, 0, 0, 0);
-    return {
-      serverNowHuman:    new Date(now).toISOString(),
-      utcMidnightHuman:  startOfDay.toISOString(),
-      totalVisitors:     all.length,
-      visitors: all.map((v) => ({
-        name:         v.fullName,
-        status:       v.status,
-        checkInHuman: new Date(v.checkInTime).toISOString(),
-        isToday:      v.checkInTime >= startOfDay.getTime(),
-      })),
-    };
   },
 });
 
