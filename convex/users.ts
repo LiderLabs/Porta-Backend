@@ -3,7 +3,6 @@ import { internalMutation, query } from "./_generated/server";
 import { v } from "convex/values";
 import { requireSelf } from "./authHelpers";
 
-// ── internal (called from Clerk webhooks only) ──────────────────────────────
 
 export const upsertFromClerk = internalMutation({
   args: {
@@ -12,6 +11,7 @@ export const upsertFromClerk = internalMutation({
     email: v.string(),
     role: v.union(v.literal("admin"), v.literal("receptionist"), v.literal("employee"), v.literal("pa"), v.literal("dept_head"), v.literal("superadmin")),
     imageUrl: v.optional(v.string()),
+    orgId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db
@@ -25,6 +25,7 @@ export const upsertFromClerk = internalMutation({
         email: args.email,
         role: args.role,
         imageUrl: args.imageUrl,
+        ...(args.orgId !== undefined ? { orgId: args.orgId } : {}),
       });
     } else {
       await ctx.db.insert("users", {
@@ -66,15 +67,36 @@ export const getByClerkId = query({
 
 /**
  * Lists users scoped to the caller's org.
- * Falls back to [] (not everyone) when no orgId can be resolved.
+ * Falls back to [] when no orgId can be resolved.
  */
 export const list = query({
   args: {},
   handler: async (ctx) => {
     const orgId = await resolveOrgId(ctx);
     if (!orgId) return [];
-    const all = await ctx.db.query("users").collect();
-    return all.filter((u: any) => u.orgId === orgId);
+    const directUsers = await ctx.db
+      .query("users")
+      .withIndex("by_org", (q) => q.eq("orgId", orgId))
+      .collect();
+    if (directUsers.length > 0) return directUsers;
+
+    // Fallback: look up users corresponding to staff in this org
+    const staff = await ctx.db
+      .query("staff")
+      .withIndex("by_org", (q) => q.eq("orgId", orgId))
+      .collect();
+    const clerkIds = staff.map((s) => s.clerkUserId).filter(Boolean) as string[];
+    if (clerkIds.length === 0) return [];
+
+    const matchedUsers: Array<any> = [];
+    for (const cid of clerkIds) {
+      const u = await ctx.db
+        .query("users")
+        .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", cid))
+        .unique();
+      if (u) matchedUsers.push(u);
+    }
+    return matchedUsers;
   },
 });
 
@@ -88,16 +110,53 @@ export const listForMessaging = query({
   handler: async (ctx, { excludeClerkId }) => {
     const orgId = await resolveOrgId(ctx);
     if (!orgId) return [];
-    const all = await ctx.db.query("users").collect();
-    return all
-      .filter((u) => u.clerkUserId !== excludeClerkId && (u as any).orgId === orgId)
-      .map((u) => ({
-        clerkUserId: u.clerkUserId,
-        name:        u.name,
-        role:        u.role,
-        department:  u.department ?? "",
-        imageUrl:    u.imageUrl,
-      }));
+
+    const staffMembers = await ctx.db
+      .query("staff")
+      .withIndex("by_org", (q) => q.eq("orgId", orgId))
+      .collect();
+
+    const seenClerkIds = new Set<string>();
+    const results: Array<{
+      clerkUserId: string;
+      name: string;
+      role: string;
+      department: string;
+      imageUrl?: string;
+    }> = [];
+
+    for (const s of staffMembers) {
+      if (s.status !== "inactive" && s.clerkUserId && s.clerkUserId !== excludeClerkId && !seenClerkIds.has(s.clerkUserId)) {
+        seenClerkIds.add(s.clerkUserId);
+        results.push({
+          clerkUserId: s.clerkUserId,
+          name: s.name,
+          role: s.role ?? "employee",
+          department: s.department ?? "",
+          imageUrl: s.avatarUrl,
+        });
+      }
+    }
+
+    const orgUsers = await ctx.db
+      .query("users")
+      .withIndex("by_org", (q) => q.eq("orgId", orgId))
+      .collect();
+
+    for (const u of orgUsers) {
+      if (u.clerkUserId !== excludeClerkId && !seenClerkIds.has(u.clerkUserId)) {
+        seenClerkIds.add(u.clerkUserId);
+        results.push({
+          clerkUserId: u.clerkUserId,
+          name: u.name,
+          role: u.role,
+          department: u.department ?? "",
+          imageUrl: u.imageUrl,
+        });
+      }
+    }
+
+    return results;
   },
 });
 

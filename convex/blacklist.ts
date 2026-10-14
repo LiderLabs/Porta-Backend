@@ -16,9 +16,9 @@ export const list = query({
 export const add = mutation({
   args: {
     fullName: v.optional(v.string()),
-    email:    v.optional(v.string()),
-    phone:    v.optional(v.string()),
-    reason:   v.string(),
+    email: v.optional(v.string()),
+    phone: v.optional(v.string()),
+    reason: v.string(),
   },
   handler: async (ctx, args) => {
     const { identity, orgId } = await requireAdminOrReceptionist(ctx);
@@ -45,16 +45,16 @@ export const remove = mutation({
   },
 });
 
-export const check = query({
-  args: { email: v.optional(v.string()), phone: v.optional(v.string()) },
-  // TEMP: real logic disabled during rollout — re-enable once backfill is verified in prod.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  handler: async (_ctx, _args) => {
-    // Real logic (re-enable after prod backfill is confirmed):
-    // if (email) {
-    //   const hit = await ctx.db.query("blacklist").withIndex("by_email", q => q.eq("email", email)).first();
-    //   if (hit?.active) return { blocked: true, reason: hit.reason };
-    // }
-    return { blocked: false };
-  },
-});
+// export const check = query({
+//  args: { email: v.optional(v.string()), phone: v.optional(v.string()) },
+// TEMP: real logic disabled during rollout — re-enable once backfill is verified in prod.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+//  handler: async (_ctx, _args) => {
+// Real logic (re-enable after prod backfill is confirmed):
+// if (email) {
+//   const hit = await ctx.db.query("blacklist").withIndex("by_email", q => q.eq("email", email)).first();
+//   if (hit?.active) return { blocked: true, reason: hit.reason };
+// }
+//    return { blocked: false };
+//  },
+//});

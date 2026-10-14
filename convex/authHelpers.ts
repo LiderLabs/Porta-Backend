@@ -25,7 +25,10 @@ export const checkAdminOrReceptionistQuery = internalQuery({
   },
 });
 
-async function requireAdminInternal(ctx: QueryCtx | MutationCtx): Promise<AuthResult> {
+async function requireRoleInternal(
+  ctx: QueryCtx | MutationCtx,
+  allowedRoles: string[]
+): Promise<AuthResult> {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) {
     throw new Error("Not authenticated");
@@ -33,7 +36,7 @@ async function requireAdminInternal(ctx: QueryCtx | MutationCtx): Promise<AuthRe
 
   const staff = await ctx.db
     .query("staff")
-    .filter((q) => q.eq(q.field("clerkUserId"), identity.subject))
+    .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", identity.subject))
     .first();
 
   let role: string | undefined = staff?.role;
@@ -58,7 +61,7 @@ async function requireAdminInternal(ctx: QueryCtx | MutationCtx): Promise<AuthRe
     }
   }
 
-  if (role !== "admin" && role !== "superadmin") {
+  if (!role || !allowedRoles.includes(role)) {
     throw new Error("Not authorized");
   }
 
@@ -74,53 +77,12 @@ async function requireAdminInternal(ctx: QueryCtx | MutationCtx): Promise<AuthRe
   return { identity, orgId, staff, role };
 }
 
+async function requireAdminInternal(ctx: QueryCtx | MutationCtx): Promise<AuthResult> {
+  return requireRoleInternal(ctx, ["admin", "superadmin"]);
+}
+
 async function requireAdminOrReceptionistInternal(ctx: QueryCtx | MutationCtx): Promise<AuthResult> {
-  const identity = await ctx.auth.getUserIdentity();
-  if (!identity) {
-    throw new Error("Not authenticated");
-  }
-
-  const staff = await ctx.db
-    .query("staff")
-    .filter((q) => q.eq(q.field("clerkUserId"), identity.subject))
-    .first();
-
-  let role: string | undefined = staff?.role;
-  let orgId: string | undefined = staff?.orgId ?? (identity.publicMetadata as any)?.orgId;
-
-  if (!staff) {
-    const org = await ctx.db
-      .query("organizations")
-      .filter((q) => q.eq(q.field("ownerEmail"), identity.email))
-      .first();
-    if (org) {
-      role = "admin";
-      orgId = org._id;
-    } else {
-      const user = await ctx.db
-        .query("users")
-        .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", identity.subject))
-        .unique();
-      if (user) {
-        role = user.role;
-      }
-    }
-  }
-
-  if (role !== "admin" && role !== "superadmin" && role !== "receptionist") {
-    throw new Error("Not authorized");
-  }
-
-  if (!orgId) {
-    const resolved = await resolveOrgId(ctx);
-    if (resolved) orgId = resolved;
-  }
-
-  if (!orgId) {
-    throw new Error("Organization not found");
-  }
-
-  return { identity, orgId, staff, role };
+  return requireRoleInternal(ctx, ["admin", "superadmin", "receptionist"]);
 }
 
 export async function requireAdmin(ctx: QueryCtx | MutationCtx | ActionCtx): Promise<AuthResult> {
@@ -137,20 +99,44 @@ export async function requireAdminOrReceptionist(ctx: QueryCtx | MutationCtx | A
   return await requireAdminOrReceptionistInternal(ctx as QueryCtx | MutationCtx);
 }
 
-export function assertSameOrg(callerOrgId: string | undefined | null, recordOrgId: string | undefined | null) {
-  if (!callerOrgId || !recordOrgId || callerOrgId !== recordOrgId) {
+export function assertSameOrg(
+  callerOrgId: string | undefined | null,
+  recordOrgId: string | undefined | null,
+  allowMissingRecordOrg = false
+) {
+  if (!callerOrgId) {
+    throw new Error("Not authorized for this organization");
+  }
+  if (!recordOrgId) {
+    if (allowMissingRecordOrg) return;
+    throw new Error("Not authorized for this organization");
+  }
+  if (callerOrgId !== recordOrgId) {
     throw new Error("Not authorized for this organization");
   }
 }
 
-/**
- * Identity-match guard. Verifies the authenticated caller IS the person
- * identified by `clerkUserId`. Use this wherever the check is "are you
- * the right person?" rather than "do you have the right role?"
- */
 export async function requireSelf(ctx: QueryCtx | MutationCtx, clerkUserId: string) {
   const identity = await ctx.auth.getUserIdentity();
   if (!identity) throw new Error("Not authenticated");
   if (identity.subject !== clerkUserId) throw new Error("Not authorized");
   return identity;
+}
+
+async function requireSuperadminInternal(ctx: QueryCtx | MutationCtx) {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) throw new Error("Not authenticated");
+  const user = await ctx.db.query("users")
+    .withIndex("by_clerk_id", q => q.eq("clerkUserId", identity.subject)).unique();
+  const isSuperadmin = user?.role === "superadmin" || (identity.publicMetadata as any)?.role === "superadmin";
+  if (!isSuperadmin) throw new Error("Not authorized");
+  return { clerkUserId: user?.clerkUserId ?? identity.subject, name: user?.name ?? (identity.name as string) ?? "Superadmin" };
+}
+export const checkSuperadminQuery = internalQuery({
+  args: {}, handler: async (ctx) => requireSuperadminInternal(ctx),
+});
+export async function requireSuperadmin(ctx: QueryCtx | MutationCtx | ActionCtx) {
+  if ("runQuery" in ctx && !("db" in ctx))
+    return await (ctx as ActionCtx).runQuery(internal.authHelpers.checkSuperadminQuery);
+  return await requireSuperadminInternal(ctx as QueryCtx | MutationCtx);
 }

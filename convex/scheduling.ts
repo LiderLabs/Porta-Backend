@@ -1,7 +1,8 @@
 import { resolveOrgId } from "./getOrgId";
-﻿import { query, mutation } from "./_generated/server";
+import { query, mutation } from "./_generated/server";
 import { api } from "./_generated/api";
 import { v } from "convex/values";
+import { requireAdminOrReceptionist, assertSameOrg } from "./authHelpers";
 
 // â”€â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -35,7 +36,7 @@ export const listByStaff = query({
   handler: async (ctx, { clerkUserId }) => {
     const staffMember = await ctx.db
       .query("staff")
-      .filter((q) => q.eq(q.field("clerkUserId"), clerkUserId))
+      .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", clerkUserId))
       .first();
     if (!staffMember) return [];
     const visits = await ctx.db
@@ -152,7 +153,7 @@ export const getUpcoming = query({
   handler: async (ctx, { clerkUserId }) => {
     const staffMember = await ctx.db
       .query("staff")
-      .filter((q) => q.eq(q.field("clerkUserId"), clerkUserId))
+      .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", clerkUserId))
       .first();
     if (!staffMember) return [];
     const now   = Date.now();
@@ -251,11 +252,13 @@ export const create = mutation({
     source:          v.optional(v.union(v.literal("walkin"), v.literal("online"), v.literal("admin"))),
   },
   handler: async (ctx, args) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
     const { hostStaffId, ...rest } = args;
     return await ctx.db.insert("scheduledVisits", {
       ...rest,
       hostId: hostStaffId,
       status: "pending",
+      orgId,
     });
   },
 });
@@ -428,13 +431,16 @@ export const searchByVisitor = query({
   args: { slug: v.string(), search: v.string() },
   handler: async (ctx, { slug, search }) => {
     if (!search || search.trim().length < 2) return [];
-    const org = await ctx.db.query("orgSettings").filter(q => q.eq(q.field("slug"), slug)).first();
+    const org = await ctx.db
+      .query("organizations")
+      .withIndex("by_slug", (q) => q.eq("slug", slug))
+      .first();
     if (!org) return [];
     const term = search.toLowerCase().trim();
     const today = new Date(); today.setHours(0,0,0,0);
     const visits = await ctx.db
       .query("scheduledVisits")
-      .filter(q => q.eq(q.field("orgId"), org.orgId))
+      .withIndex("by_org", (q) => q.eq("orgId", org._id))
       .collect();
     return visits.filter(v =>
       (v.status === "approved" || v.status === "pending") &&
@@ -508,6 +514,10 @@ export const reschedule = mutation({
 export const remove = mutation({
   args: { visitId: v.id("scheduledVisits") },
   handler: async (ctx, { visitId }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const visit = await ctx.db.get(visitId);
+    if (!visit) return;
+    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
     await ctx.db.delete(visitId);
   },
 });
@@ -564,7 +574,7 @@ export const setAvailability = mutation({
   handler: async (ctx, { clerkUserId, availability }) => {
     const staffMember = await ctx.db
       .query("staff")
-      .filter((q) => q.eq(q.field("clerkUserId"), clerkUserId))
+      .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", clerkUserId))
       .first();
     if (!staffMember) throw new Error("Staff member not found");
     await ctx.db.patch(staffMember._id, { availability });
