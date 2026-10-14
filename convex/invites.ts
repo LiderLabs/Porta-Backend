@@ -1,8 +1,8 @@
 import { resolveOrgId } from "./getOrgId";
 import { query, mutation, action, internalMutation } from "./_generated/server";
 import { v } from "convex/values";
-import { api, internal } from "./_generated/api";
-import { requireAdmin } from "./authHelpers";
+import { internal } from "./_generated/api";
+import { requireAdmin, assertSameOrg } from "./authHelpers";
 
 const STAFF_ROLES = ["receptionist", "employee", "dept_head", "pa"] as const;
 const ADMIN_ROLES = ["admin"] as const;
@@ -11,9 +11,12 @@ export const list = query({
   args: {},
   handler: async (ctx) => {
     const orgId = await resolveOrgId(ctx);
-    const all = await ctx.db.query("invites").order("desc").collect();
     if (!orgId) return [];
-    return all.filter((i: any) => i.orgId === orgId);
+    return await ctx.db
+      .query("invites")
+      .withIndex("by_org", (q) => q.eq("orgId", orgId))
+      .order("desc")
+      .collect();
   },
 });
 
@@ -27,13 +30,14 @@ export const getByToken = query({
   },
 });
 
-export const create = mutation({
+export const create = internalMutation({
   args: {
     name: v.string(),
     email: v.string(),
     role: v.union(
       v.literal("admin"), v.literal("receptionist"),
-      v.literal("employee"), v.literal("dept_head"), v.literal("pa")
+      v.literal("employee"), v.literal("dept_head"), v.literal("pa"),
+      v.literal("superadmin")
     ),
     department: v.optional(v.string()),
     invitedByClerkId: v.string(),
@@ -56,6 +60,11 @@ export const create = mutation({
 export const revoke = mutation({
   args: { inviteId: v.id("invites") },
   handler: async (ctx, { inviteId }) => {
+    const { orgId } = await requireAdmin(ctx);
+    const invite = await ctx.db.get(inviteId);
+    if (!invite) throw new Error("Invite not found");
+    assertSameOrg(orgId, invite.orgId, true);
+
     await ctx.db.patch(inviteId, { status: "revoked" });
   },
 });
@@ -127,8 +136,8 @@ export const sendInvite = action({
       throw new Error(msg);
     }
 
-    // Create the staff record now � clerkUserId will be linked when they
-    // first log in via linkClerkUser mutation below
+    // Create the staff record now – clerkUserId will be linked when they
+    // first log in via linkClerkUserInternal mutation
     await ctx.runMutation(internal.staff.createWithRole, {
       name: args.name,
       email: args.email,
@@ -139,7 +148,7 @@ export const sendInvite = action({
     });
 
     // Record invite
-    const inviteId: string = await ctx.runMutation(api.invites.create, {
+    const inviteId: string = await ctx.runMutation(internal.invites.create, {
       name: args.name,
       email: args.email,
       role: args.role,
@@ -154,29 +163,12 @@ export const sendInvite = action({
   },
 });
 
-export const linkClerkUser = mutation({
-  args: {
-    clerkUserId: v.string(),
-    email: v.string(),
-  },
-  handler: async (ctx, { clerkUserId, email }) => {
-    // Find unlinked staff record matching this email
-    const staffMember = await ctx.db
-      .query("staff")
-      .filter(q => q.eq(q.field("email"), email))
-      .first();
-    if (!staffMember) return null;
-    if (staffMember.clerkUserId) return staffMember; // already linked
-    await ctx.db.patch(staffMember._id, { clerkUserId });
-    return { ...staffMember, clerkUserId };
-  },
-});
-
 export const markAccepted = internalMutation({
   args: { email: v.string() },
   handler: async (ctx, { email }) => {
-    const invite = await ctx.db.query("invites")
-      .filter(q => q.eq(q.field("email"), email))
+    const invite = await ctx.db
+      .query("invites")
+      .withIndex("by_email", (q) => q.eq("email", email))
       .first();
     if (invite && invite.status !== "accepted") {
       await ctx.db.patch(invite._id, { status: "accepted", acceptedAt: Date.now() });
@@ -187,8 +179,10 @@ export const markAccepted = internalMutation({
 export const linkClerkUserInternal = internalMutation({
   args: { clerkUserId: v.string(), email: v.string() },
   handler: async (ctx, { clerkUserId, email }) => {
-    const allStaff = await ctx.db.query("staff").collect();
-    const staffMember = allStaff.find(s => s.email?.toLowerCase().trim() === email.toLowerCase().trim());
+    const staffMember = await ctx.db
+      .query("staff")
+      .withIndex("by_email", (q) => q.eq("email", email.toLowerCase().trim()))
+      .first();
     if (!staffMember || staffMember.clerkUserId) return;
     await ctx.db.patch(staffMember._id, { clerkUserId });
   },

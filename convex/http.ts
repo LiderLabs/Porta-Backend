@@ -1,4 +1,4 @@
-﻿import { httpRouter } from "convex/server";
+import { httpRouter } from "convex/server";
 import { httpAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { Webhook } from "svix";
@@ -45,7 +45,7 @@ http.route({
         (e) => (e as unknown as { id: string }).id === primaryEmailId
       );
 
-      const metadata = data.public_metadata as { role?: string } | undefined;
+      const metadata = data.public_metadata as { role?: string; orgId?: string } | undefined;
       const role = (metadata?.role ?? "employee") as
         | "admin"
         | "receptionist"
@@ -60,6 +60,7 @@ http.route({
         email: primaryEmail?.email_address ?? "",
         role,
         imageUrl: (data.image_url as string) ?? undefined,
+        orgId: metadata?.orgId,
       });
     }
 

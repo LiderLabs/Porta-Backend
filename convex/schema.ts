@@ -1,4 +1,4 @@
-﻿import { defineSchema, defineTable } from "convex/server";
+import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
 export const VISIT_STATUS = v.union(
@@ -26,10 +26,12 @@ export default defineSchema({
     ),
     department: v.optional(v.string()),
     imageUrl: v.optional(v.string()),
+    orgId: v.optional(v.string()),
     createdAt: v.number(),
   })
     .index("by_clerk_id", ["clerkUserId"])
-    .index("by_email", ["email"]),
+    .index("by_email", ["email"])
+    .index("by_org", ["orgId"]),
 
   organizations: defineTable({
     name: v.string(),
@@ -111,7 +113,8 @@ export default defineSchema({
   })
     .index("by_token",  ["token"])
     .index("by_email",  ["email"])
-    .index("by_status", ["status"]),
+    .index("by_status", ["status"])
+    .index("by_org",    ["orgId"]),
 
   blacklist: defineTable({
     fullName:       v.optional(v.string()),
@@ -122,9 +125,11 @@ export default defineSchema({
     addedByName:    v.string(),
     active:         v.boolean(),
     createdAt:      v.number(),
+    orgId:          v.optional(v.string()),
   })
     .index("by_email",  ["email"])
-    .index("by_active", ["active"]),
+    .index("by_active", ["active"])
+    .index("by_org",    ["orgId"]),
 
   planDefinitions: defineTable({
     planId:      v.string(),
@@ -176,7 +181,10 @@ export default defineSchema({
     avatarUrl:   v.optional(v.string()),
     status:      v.optional(v.union(v.literal("active"), v.literal("inactive"))),
     availability: v.optional(v.union(v.literal("available"), v.literal("busy"), v.literal("away"), v.literal("off"))),
-  }).index("by_org", ["orgId"]),
+  })
+    .index("by_org", ["orgId"])
+    .index("by_clerk_id", ["clerkUserId"])
+    .index("by_email", ["email"]),
 
   visitors: defineTable({
     fullName:     v.string(),
@@ -193,9 +201,11 @@ export default defineSchema({
     checkOutTime: v.optional(v.number()),
     status:       v.union(v.literal("IN"), v.literal("OUT")),
     scheduledVisitId: v.optional(v.id("scheduledVisits")),
+    orgId:        v.optional(v.string()),
   })
     .index("by_status",      ["status"])
-    .index("by_checkInTime", ["checkInTime"]),
+    .index("by_checkInTime", ["checkInTime"])
+    .index("by_org",         ["orgId"]),
 
   scheduledVisits: defineTable({
     visitorName:     v.string(),

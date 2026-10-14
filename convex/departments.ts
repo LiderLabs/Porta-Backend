@@ -1,6 +1,7 @@
-﻿import { query, mutation } from "./_generated/server";
+import { query, mutation } from "./_generated/server";
 import { v } from "convex/values";
 import { resolveOrgId } from "./getOrgId";
+import { requireAdmin, assertSameOrg } from "./authHelpers";
 
 export const list = query({
   args: {},
@@ -29,8 +30,12 @@ export const create = mutation({
     color: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const orgId = await resolveOrgId(ctx);
-    return await ctx.db.insert("departments", { ...args, orgId: orgId ?? undefined, createdAt: Date.now() });
+    const { orgId } = await requireAdmin(ctx);
+    return await ctx.db.insert("departments", {
+      ...args,
+      orgId,
+      createdAt: Date.now(),
+    });
   },
 });
 
@@ -43,6 +48,10 @@ export const update = mutation({
     color: v.optional(v.string()),
   },
   handler: async (ctx, { deptId, ...rest }) => {
+    const { orgId } = await requireAdmin(ctx);
+    const dept = await ctx.db.get(deptId);
+    if (!dept) throw new Error("Department not found");
+    assertSameOrg(orgId, dept.orgId);
     await ctx.db.patch(deptId, rest);
   },
 });
@@ -50,6 +59,10 @@ export const update = mutation({
 export const remove = mutation({
   args: { deptId: v.id("departments") },
   handler: async (ctx, { deptId }) => {
+    const { orgId } = await requireAdmin(ctx);
+    const dept = await ctx.db.get(deptId);
+    if (!dept) throw new Error("Department not found");
+    assertSameOrg(orgId, dept.orgId);
     await ctx.db.delete(deptId);
   },
 });
@@ -68,6 +81,10 @@ export const updateHours = mutation({
     }),
   },
   handler: async (ctx, { deptId, officeHours }) => {
+    const { orgId } = await requireAdmin(ctx);
+    const dept = await ctx.db.get(deptId);
+    if (!dept) throw new Error("Department not found");
+    assertSameOrg(orgId, dept.orgId);
     await ctx.db.patch(deptId, { officeHours });
   },
 });
