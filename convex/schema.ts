@@ -26,10 +26,12 @@ export default defineSchema({
     ),
     department: v.optional(v.string()),
     imageUrl: v.optional(v.string()),
+    orgId: v.optional(v.string()),
     createdAt: v.number(),
   })
     .index("by_clerk_id", ["clerkUserId"])
-    .index("by_email", ["email"]),
+    .index("by_email", ["email"])
+    .index("by_org", ["orgId"]),
 
   organizations: defineTable({
     name: v.string(),
@@ -111,7 +113,8 @@ export default defineSchema({
   })
     .index("by_token",  ["token"])
     .index("by_email",  ["email"])
-    .index("by_status", ["status"]),
+    .index("by_status", ["status"])
+    .index("by_org",    ["orgId"]),
 
   blacklist: defineTable({
     fullName:       v.optional(v.string()),
@@ -178,7 +181,10 @@ export default defineSchema({
     avatarUrl:   v.optional(v.string()),
     status:      v.optional(v.union(v.literal("active"), v.literal("inactive"))),
     availability: v.optional(v.union(v.literal("available"), v.literal("busy"), v.literal("away"), v.literal("off"))),
-  }).index("by_org", ["orgId"]),
+  })
+    .index("by_org", ["orgId"])
+    .index("by_clerk_id", ["clerkUserId"])
+    .index("by_email", ["email"]),
 
   visitors: defineTable({
     fullName:     v.string(),
@@ -305,8 +311,9 @@ export default defineSchema({
       logoUrl:      v.optional(v.string()),
       appName:      v.optional(v.string()),
     })),
+    orgId:     v.optional(v.string()),
     updatedAt: v.number(),
-  }),
+  }).index("by_org", ["orgId"]),
 
   platformSettings: defineTable({
     trialDays:          v.number(),

@@ -24,10 +24,14 @@ const DEFAULTS = {
 export const get = query({
   args: {},
   handler: async (ctx) => {
-    const identity = await ctx.auth.getUserIdentity();
     const orgId = await resolveOrgId(ctx);
-    const s = await ctx.db.query("orgSettings").first();
-    const base = s ? s : { ...DEFAULTS, _id: null };
+    const s = orgId
+      ? await ctx.db
+          .query("orgSettings")
+          .withIndex("by_org", (q) => q.eq("orgId", orgId))
+          .first()
+      : await ctx.db.query("orgSettings").first();
+    const base = s ? s : { ...DEFAULTS, _id: null, orgId };
     if (orgId) {
       try {
         const org = await ctx.db.get(orgId as any);
@@ -66,12 +70,15 @@ export const save = mutation({
     })),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx);
-    const existing = await ctx.db.query("orgSettings").first();
+    const { orgId } = await requireAdmin(ctx);
+    const existing = await ctx.db
+      .query("orgSettings")
+      .withIndex("by_org", (q) => q.eq("orgId", orgId))
+      .first();
     if (existing) {
-      await ctx.db.patch(existing._id, { ...args, updatedAt: Date.now() });
+      await ctx.db.patch(existing._id, { ...args, orgId, updatedAt: Date.now() });
     } else {
-      await ctx.db.insert("orgSettings", { ...args, updatedAt: Date.now() });
+      await ctx.db.insert("orgSettings", { ...args, orgId, updatedAt: Date.now() });
     }
   },
 });

@@ -10,7 +10,7 @@ export async function resolveOrgId(ctx: QueryCtx | MutationCtx): Promise<string 
 
   const staffRecord = await ctx.db
     .query("staff")
-    .filter((q) => q.eq(q.field("clerkUserId"), identity.subject))
+    .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", identity.subject))
     .first();
   if (staffRecord?.orgId) return staffRecord.orgId as string;
 

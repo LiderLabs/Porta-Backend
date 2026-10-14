@@ -1,6 +1,7 @@
-import { query, mutation, action } from "./_generated/server";
 import { api, internal } from "./_generated/api";
 import { v } from "convex/values";
+import { query, mutation, action, internalQuery, internalMutation, internalAction } from "./_generated/server";
+import { requireSuperadmin } from "./authHelpers";
 
 const DEFAULT_FEATURES = {
   checkInEnabled: true,
@@ -20,6 +21,7 @@ const DEFAULT_FEATURES = {
 export const listOrgs = query({
   args: {},
   handler: async (ctx) => {
+    await requireSuperadmin(ctx);
     const orgs = await ctx.db.query("organizations").order("desc").collect();
     const staff = await ctx.db.query("staff").collect();
     return orgs.map(org => ({
@@ -32,6 +34,7 @@ export const listOrgs = query({
 export const platformStats = query({
   args: {},
   handler: async (ctx) => {
+    await requireSuperadmin(ctx);
     const orgs = await ctx.db.query("organizations").collect();
     const users = await ctx.db.query("users").collect();
     const visitors = await ctx.db.query("visitors").collect();
@@ -101,6 +104,10 @@ export const createOrg = mutation({
     })),
   },
   handler: async (ctx, { actorClerkId, actorName, ...args }) => {
+    const admin = await requireSuperadmin(ctx);
+    const actorId = admin.clerkUserId || actorClerkId;
+    const actor = admin.name || actorName;
+
     // Check slug not already taken
     const existing = await ctx.db
       .query("organizations")
@@ -122,11 +129,11 @@ export const createOrg = mutation({
 
     await ctx.db.insert("auditLog", {
       action: "CREATE_ORG",
-      actorClerkId, actorName,
+      actorClerkId: actorId, actorName: actor,
       targetType: "organization",
       targetId: id,
       targetLabel: args.name,
-      detail: `Plan: ${args.plan} � Owner: ${args.ownerEmail}`,
+      detail: `Plan: ${args.plan} – Owner: ${args.ownerEmail}`,
       createdAt: Date.now(),
     });
 
@@ -134,7 +141,7 @@ export const createOrg = mutation({
   },
 });
 
-// -- Send admin invite (called separately after createOrg) ---------------------
+
 export const sendAdminInvite = action({
   args: {
     orgId: v.id("organizations"),
@@ -145,6 +152,7 @@ export const sendAdminInvite = action({
     actorName: v.string(),
   },
   handler: async (ctx, args) => {
+    await requireSuperadmin(ctx);
     const clerkSecretKey = process.env.CLERK_SECRET_KEY;
     if (!clerkSecretKey) throw new Error("Missing CLERK_SECRET_KEY");
     const adminAppUrl = (process.env.ADMIN_APP_URL ?? "http://localhost:5176") + "/sign-up";
@@ -182,7 +190,6 @@ export const sendAdminInvite = action({
       orgId: args.orgId,
     });
 
-    // Create staff record immediately so resolveOrgId works from first login
     await ctx.runMutation(internal.staff.createWithRole, {
       name: args.adminName,
       email: args.adminEmail,
@@ -191,7 +198,8 @@ export const sendAdminInvite = action({
       status: "active",
     });
 
-    await ctx.runMutation(api.superadmin.logAudit, {
+
+    await ctx.runMutation(internal.superadmin.logAudit, {
       action: "SEND_ADMIN_INVITE",
       actorClerkId: args.actorClerkId,
       actorName: args.actorName,
@@ -205,7 +213,7 @@ export const sendAdminInvite = action({
   },
 });
 
-export const logAudit = mutation({
+export const logAudit = internalMutation({
   args: {
     action: v.string(),
     actorClerkId: v.string(),
@@ -226,33 +234,40 @@ export const blockOrg = mutation({
     actorClerkId: v.string(), actorName: v.string(),
   },
   handler: async (ctx, { orgId, reason, actorClerkId, actorName }) => {
+    const admin = await requireSuperadmin(ctx);
     const org = await ctx.db.get(orgId);
     await ctx.db.patch(orgId, { status: "blocked", blockedReason: reason });
-    await ctx.db.insert("auditLog", { action: "BLOCK_ORG", actorClerkId, actorName, targetType: "organization", targetId: orgId, targetLabel: org?.name, detail: reason ?? "No reason", createdAt: Date.now() });
+    await ctx.db.insert("auditLog", { action: "BLOCK_ORG", actorClerkId: admin.clerkUserId || actorClerkId, actorName: admin.name || actorName, targetType: "organization", targetId: orgId, targetLabel: org?.name, detail: reason ?? "No reason", createdAt: Date.now() });
   },
 });
 
 export const unblockOrg = mutation({
   args: { orgId: v.id("organizations"), actorClerkId: v.string(), actorName: v.string() },
   handler: async (ctx, { orgId, actorClerkId, actorName }) => {
+    const admin = await requireSuperadmin(ctx);
     const org = await ctx.db.get(orgId);
     await ctx.db.patch(orgId, { status: "active", blockedReason: undefined });
-    await ctx.db.insert("auditLog", { action: "UNBLOCK_ORG", actorClerkId, actorName, targetType: "organization", targetId: orgId, targetLabel: org?.name, createdAt: Date.now() });
+    await ctx.db.insert("auditLog", { action: "UNBLOCK_ORG", actorClerkId: admin.clerkUserId || actorClerkId, actorName: admin.name || actorName, targetType: "organization", targetId: orgId, targetLabel: org?.name, createdAt: Date.now() });
   },
 });
 
 export const activateOrg = mutation({
   args: { orgId: v.id("organizations"), actorClerkId: v.string(), actorName: v.string() },
   handler: async (ctx, { orgId, actorClerkId, actorName }) => {
+    const admin = await requireSuperadmin(ctx);
     const org = await ctx.db.get(orgId);
     await ctx.db.patch(orgId, { status: "active", blockedReason: undefined });
-    await ctx.db.insert("auditLog", { action: "ACTIVATE_ORG", actorClerkId, actorName, targetType: "organization", targetId: orgId, targetLabel: org?.name, detail: "Manually activated from trial", createdAt: Date.now() });
+    await ctx.db.insert("auditLog", { action: "ACTIVATE_ORG", actorClerkId: admin.clerkUserId || actorClerkId, actorName: admin.name || actorName, targetType: "organization", targetId: orgId, targetLabel: org?.name, detail: "Manually activated from trial", createdAt: Date.now() });
   },
 });
 
-export const expireTrials = mutation({
+export const expireTrials = internalMutation({
   args: {},
   handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity) {
+      await requireSuperadmin(ctx);
+    }
     const now = Date.now();
     const trialOrgs = await ctx.db.query("organizations").withIndex("by_status", q => q.eq("status", "trial")).collect();
     let count = 0;
@@ -273,10 +288,11 @@ export const updatePlan = mutation({
     actorClerkId: v.string(), actorName: v.string(),
   },
   handler: async (ctx, { orgId, plan, actorClerkId, actorName }) => {
+    const admin = await requireSuperadmin(ctx);
     const org = await ctx.db.get(orgId);
     const autoFeatures = PLAN_FEATURES[plan] ?? PLAN_FEATURES.free;
     await ctx.db.patch(orgId, { plan, features: autoFeatures as any });
-    await ctx.db.insert("auditLog", { action: "UPDATE_PLAN", actorClerkId, actorName, targetType: "organization", targetId: orgId, targetLabel: org?.name, detail: `Changed to ${plan}`, createdAt: Date.now() });
+    await ctx.db.insert("auditLog", { action: "UPDATE_PLAN", actorClerkId: admin.clerkUserId || actorClerkId, actorName: admin.name || actorName, targetType: "organization", targetId: orgId, targetLabel: org?.name, detail: `Changed to ${plan}`, createdAt: Date.now() });
   },
 });
 
@@ -292,9 +308,10 @@ export const updateFeatures = mutation({
     actorClerkId: v.string(), actorName: v.string(),
   },
   handler: async (ctx, { orgId, features, actorClerkId, actorName }) => {
+    const admin = await requireSuperadmin(ctx);
     const org = await ctx.db.get(orgId);
     await ctx.db.patch(orgId, { features });
-    await ctx.db.insert("auditLog", { action: "UPDATE_FEATURES", actorClerkId, actorName, targetType: "organization", targetId: orgId, targetLabel: org?.name, detail: "Feature flags updated", createdAt: Date.now() });
+    await ctx.db.insert("auditLog", { action: "UPDATE_FEATURES", actorClerkId: admin.clerkUserId || actorClerkId, actorName: admin.name || actorName, targetType: "organization", targetId: orgId, targetLabel: org?.name, detail: "Feature flags updated", createdAt: Date.now() });
   },
 });
 
@@ -314,20 +331,22 @@ export const updateOrg = mutation({
     actorClerkId: v.string(), actorName: v.string(),
   },
   handler: async (ctx, { orgId, actorClerkId, actorName, ...fields }) => {
+    const admin = await requireSuperadmin(ctx);
     const updates: Record<string, any> = {};
     for (const [k, v] of Object.entries(fields)) {
       if (v !== undefined) updates[k] = v;
     }
     await ctx.db.patch(orgId, updates);
-    await ctx.db.insert("auditLog", { action: "UPDATE_ORG", actorClerkId, actorName, targetType: "org", targetId: orgId, targetLabel: fields.name, detail: "Updated org details", createdAt: Date.now() });
+    await ctx.db.insert("auditLog", { action: "UPDATE_ORG", actorClerkId: admin.clerkUserId || actorClerkId, actorName: admin.name || actorName, targetType: "org", targetId: orgId, targetLabel: fields.name, detail: "Updated org details", createdAt: Date.now() });
   },
 });
 
 export const deleteOrg = mutation({
   args: { orgId: v.id("organizations"), actorClerkId: v.string(), actorName: v.string() },
   handler: async (ctx, { orgId, actorClerkId, actorName }) => {
+    const admin = await requireSuperadmin(ctx);
     const org = await ctx.db.get(orgId);
-    await ctx.db.insert("auditLog", { action: "DELETE_ORG", actorClerkId, actorName, targetType: "organization", targetId: orgId, targetLabel: org?.name, detail: "Permanently deleted", createdAt: Date.now() });
+    await ctx.db.insert("auditLog", { action: "DELETE_ORG", actorClerkId: admin.clerkUserId || actorClerkId, actorName: admin.name || actorName, targetType: "organization", targetId: orgId, targetLabel: org?.name, detail: "Permanently deleted", createdAt: Date.now() });
     await ctx.db.delete(orgId);
   },
 });
@@ -335,6 +354,7 @@ export const deleteOrg = mutation({
 export const listAuditLog = query({
   args: { limit: v.optional(v.number()) },
   handler: async (ctx, { limit }) => {
+    await requireSuperadmin(ctx);
     return await ctx.db.query("auditLog").withIndex("by_createdAt").order("desc").take(limit ?? 50);
   },
 });
@@ -349,6 +369,7 @@ export const PLAN_FEATURES: Record<string, Record<string, boolean>> = {
 export const listPlanDefinitions = query({
   args: {},
   handler: async (ctx) => {
+    await requireSuperadmin(ctx);
     return await ctx.db.query("planDefinitions").collect();
   },
 });
@@ -370,19 +391,21 @@ export const upsertPlanDefinition = mutation({
     actorClerkId: v.string(), actorName: v.string(),
   },
   handler: async (ctx, { actorClerkId, actorName, ...args }) => {
+    const admin = await requireSuperadmin(ctx);
     const existing = await ctx.db.query("planDefinitions").withIndex("by_planId", q => q.eq("planId", args.planId)).first();
     if (existing) { await ctx.db.patch(existing._id, { ...args, updatedAt: Date.now() }); }
     else { await ctx.db.insert("planDefinitions", { ...args, updatedAt: Date.now() }); }
-    await ctx.db.insert("auditLog", { action: "UPSERT_PLAN_DEF", actorClerkId, actorName, targetType: "planDefinition", targetLabel: args.name, detail: `Plan: ${args.planId}`, createdAt: Date.now() });
+    await ctx.db.insert("auditLog", { action: "UPSERT_PLAN_DEF", actorClerkId: admin.clerkUserId || actorClerkId, actorName: admin.name || actorName, targetType: "planDefinition", targetLabel: args.name, detail: `Plan: ${args.planId}`, createdAt: Date.now() });
   },
 });
 
 export const deletePlanDefinition = mutation({
   args: { planId: v.string(), actorClerkId: v.string(), actorName: v.string() },
   handler: async (ctx, { planId, actorClerkId, actorName }) => {
+    const admin = await requireSuperadmin(ctx);
     const existing = await ctx.db.query("planDefinitions").withIndex("by_planId", q => q.eq("planId", planId)).first();
     if (existing) await ctx.db.delete(existing._id);
-    await ctx.db.insert("auditLog", { action: "DELETE_PLAN_DEF", actorClerkId, actorName, targetType: "planDefinition", targetLabel: planId, createdAt: Date.now() });
+    await ctx.db.insert("auditLog", { action: "DELETE_PLAN_DEF", actorClerkId: admin.clerkUserId || actorClerkId, actorName: admin.name || actorName, targetType: "planDefinition", targetLabel: planId, createdAt: Date.now() });
   },
 });
 
@@ -394,6 +417,7 @@ export const sendAdminInvites = action({
     actorClerkId: v.string(), actorName: v.string(),
   },
   handler: async (ctx, { orgId, orgName, admins, actorClerkId, actorName }) => {
+    await requireSuperadmin(ctx);
     const results = [];
     for (const admin of admins) {
       try {
@@ -413,7 +437,8 @@ export const setUserMetadata = action({
     orgName: v.string(),
     role: v.union(v.literal("admin"), v.literal("staff")),
   },
-  handler: async (_ctx, { userClerkId, orgId, orgName, role }) => {
+  handler: async (ctx, { userClerkId, orgId, orgName, role }) => {
+    await requireSuperadmin(ctx);
     const res = await fetch(`https://api.clerk.com/v1/users/${userClerkId}/metadata`, {
       method: "PATCH",
       headers: {
@@ -445,6 +470,7 @@ const PLATFORM_DEFAULTS = {
 export const getPlatformSettings = query({
   args: {},
   handler: async (ctx) => {
+    await requireSuperadmin(ctx);
     const s = await ctx.db.query("platformSettings").first();
     return s ?? { ...PLATFORM_DEFAULTS, _id: null };
   },
@@ -468,8 +494,9 @@ export const savePlatformSettings = mutation({
     actorName: v.string(),
   },
   handler: async (ctx, { actorClerkId, actorName, ...settings }) => {
+    const admin = await requireSuperadmin(ctx);
     const existing = await ctx.db.query("platformSettings").first();
-    const data = { ...settings, updatedAt: Date.now(), updatedBy: actorName };
+    const data = { ...settings, updatedAt: Date.now(), updatedBy: admin.name || actorName };
     if (existing) {
       await ctx.db.patch(existing._id, data);
     } else {
@@ -477,8 +504,8 @@ export const savePlatformSettings = mutation({
     }
     await ctx.db.insert("auditLog", {
       action: "UPDATE_PLATFORM_SETTINGS",
-      actorClerkId,
-      actorName,
+      actorClerkId: admin.clerkUserId || actorClerkId,
+      actorName: admin.name || actorName,
       targetType: "platform",
       targetId: "platform",
       targetLabel: "Platform Settings",
@@ -491,12 +518,13 @@ export const savePlatformSettings = mutation({
 export const clearAuditLog = mutation({
   args: { actorClerkId: v.string(), actorName: v.string() },
   handler: async (ctx, { actorClerkId, actorName }) => {
+    const admin = await requireSuperadmin(ctx);
     const logs = await ctx.db.query("auditLog").collect();
     await Promise.all(logs.map(l => ctx.db.delete(l._id)));
     await ctx.db.insert("auditLog", {
       action: "CLEAR_AUDIT_LOG",
-      actorClerkId,
-      actorName,
+      actorClerkId: admin.clerkUserId || actorClerkId,
+      actorName: admin.name || actorName,
       targetType: "platform",
       targetId: "platform",
       targetLabel: "Audit Log",
@@ -509,6 +537,7 @@ export const clearAuditLog = mutation({
 export const resetAllFeatureFlags = mutation({
   args: { actorClerkId: v.string(), actorName: v.string() },
   handler: async (ctx, { actorClerkId, actorName }) => {
+    const admin = await requireSuperadmin(ctx);
     const orgs = await ctx.db.query("organizations").collect();
     const defaults = {
       checkInEnabled: true, badgesEnabled: false, schedulingEnabled: true,
@@ -519,8 +548,8 @@ export const resetAllFeatureFlags = mutation({
     await Promise.all(orgs.map(o => ctx.db.patch(o._id, { features: defaults })));
     await ctx.db.insert("auditLog", {
       action: "RESET_FEATURE_FLAGS",
-      actorClerkId,
-      actorName,
+      actorClerkId: admin.clerkUserId || actorClerkId,
+      actorName: admin.name || actorName,
       targetType: "platform",
       targetId: "platform",
       targetLabel: "All Orgs",
@@ -530,17 +559,14 @@ export const resetAllFeatureFlags = mutation({
   },
 });
 
-
-
-
-
 export const migrateStaffClerkMetadata = action({
   args: {},
   handler: async (ctx) => {
+    await requireSuperadmin(ctx);
     const clerkSecretKey = process.env.CLERK_SECRET_KEY;
     if (!clerkSecretKey) throw new Error("Missing CLERK_SECRET_KEY");
 
-    const staff = await ctx.runQuery(api.superadmin.listAllStaff);
+    const staff = await ctx.runQuery(internal.superadmin.listAllStaff);
     const results = { updated: 0, skipped: 0, failed: 0, errors: [] as string[] };
 
     for (const member of staff) {
@@ -570,7 +596,7 @@ export const migrateStaffClerkMetadata = action({
   },
 });
 
-export const listAllStaff = query({
+export const listAllStaff = internalQuery({
   args: {},
   handler: async (ctx) => {
     return await ctx.db.query("staff").collect();
@@ -580,40 +606,12 @@ export const listAllStaff = query({
 export const migrateRoomsOrgId = mutation({
   args: { orgId: v.string() },
   handler: async (ctx, { orgId }) => {
+    await requireSuperadmin(ctx);
     const rooms = await ctx.db.query("rooms").collect();
     const unlinked = rooms.filter((r: any) => !r.orgId);
     for (const room of unlinked) {
       await ctx.db.patch(room._id, { orgId });
     }
     return { patched: unlinked.length, total: rooms.length };
-  },
-});
-
-export const debugMyIdentity = query({
-  args: {},
-  handler: async (ctx) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) return { error: "not authenticated" };
-
-    const staffByClerkId = await ctx.db.query("staff")
-      .filter(q => q.eq(q.field("clerkUserId"), identity.subject))
-      .first();
-
-    const staffByEmail = await ctx.db.query("staff")
-      .filter(q => q.eq(q.field("email"), identity.email))
-      .first();
-
-    const orgByEmail = await ctx.db.query("organizations")
-      .filter(q => q.eq(q.field("ownerEmail"), identity.email))
-      .first();
-
-    return {
-      subject: identity.subject,
-      email: identity.email,
-      metaOrgId: (identity.publicMetadata as any)?.orgId ?? null,
-      staffByClerkId: staffByClerkId ? { id: staffByClerkId._id, orgId: staffByClerkId.orgId, clerkUserId: staffByClerkId.clerkUserId } : null,
-      staffByEmail: staffByEmail ? { id: staffByEmail._id, orgId: staffByEmail.orgId, clerkUserId: staffByEmail.clerkUserId } : null,
-      orgByEmail: orgByEmail ? { id: orgByEmail._id, name: orgByEmail.name } : null,
-    };
   },
 });

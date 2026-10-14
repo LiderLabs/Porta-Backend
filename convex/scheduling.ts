@@ -2,7 +2,7 @@ import { resolveOrgId } from "./getOrgId";
 import { query, mutation } from "./_generated/server";
 import { api, internal } from "./_generated/api";
 import { v } from "convex/values";
-
+import { requireAdminOrReceptionist, assertSameOrg } from "./authHelpers";
 
 async function withHostName(ctx: any, visit: any) {
   if (!visit.hostId) return { ...visit, hostName: null };
@@ -10,14 +10,13 @@ async function withHostName(ctx: any, visit: any) {
   return { ...visit, hostName: s?.name ?? null };
 }
 
-
 export const list = query({
   args: {},
   handler: async (ctx) => {
-    const orgId = await resolveOrgId(ctx);
+    const { orgId } = await requireAdminOrReceptionist(ctx);
     const visits = await ctx.db.query("scheduledVisits").order("desc").collect();
     const staffList = await ctx.db.query("staff").collect();
-    const filtered = orgId ? visits.filter((v: any) => v.orgId === orgId) : visits;
+    const filtered = visits.filter((v: any) => v.orgId === orgId);
     return filtered.map((v: any) => {
       const host = v.hostId ? staffList.find((s: any) => s._id === v.hostId) : null;
       return { ...v, hostName: host?.name ?? null };
@@ -25,13 +24,13 @@ export const list = query({
   },
 });
 
-/** Visits for a specific staff member â€” used by staff app. */
+/** Visits for a specific staff member — used by staff app. */
 export const listByStaff = query({
   args: { clerkUserId: v.string() },
   handler: async (ctx, { clerkUserId }) => {
     const staffMember = await ctx.db
       .query("staff")
-      .filter((q) => q.eq(q.field("clerkUserId"), clerkUserId))
+      .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", clerkUserId))
       .first();
     if (!staffMember) return [];
     const visits = await ctx.db
@@ -136,7 +135,7 @@ export const getUpcoming = query({
   handler: async (ctx, { clerkUserId }) => {
     const staffMember = await ctx.db
       .query("staff")
-      .filter((q) => q.eq(q.field("clerkUserId"), clerkUserId))
+      .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", clerkUserId))
       .first();
     if (!staffMember) return [];
     const now = Date.now();
@@ -159,6 +158,7 @@ export const getUpcoming = query({
 export const getTodayForReceptionist = query({
   args: {},
   handler: async (ctx) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
     const start = new Date(); start.setHours(0, 0, 0, 0);
     const end = new Date(); end.setHours(23, 59, 59, 999);
     const all = await ctx.db
@@ -169,6 +169,7 @@ export const getTodayForReceptionist = query({
       .collect();
     const staffList = await ctx.db.query("staff").collect();
     return all
+      .filter((v: any) => v.orgId === orgId)
       .map((v) => ({ ...v, hostName: staffList.find((s) => s._id === v.hostId)?.name ?? null }))
       .sort((a, b) => a.scheduledDate - b.scheduledDate);
   },
@@ -235,11 +236,13 @@ export const create = mutation({
     source: v.optional(v.union(v.literal("walkin"), v.literal("online"), v.literal("admin"))),
   },
   handler: async (ctx, args) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
     const { hostStaffId, ...rest } = args;
     return await ctx.db.insert("scheduledVisits", {
       ...rest,
       hostId: hostStaffId,
       status: "pending",
+      orgId,
     });
   },
 });
@@ -324,6 +327,11 @@ export const approve = mutation({
     actorName: v.optional(v.string()),
   },
   handler: async (ctx, { visitId, actorClerkId, actorName }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const visit = await ctx.db.get(visitId);
+    if (!visit) throw new Error("Visit not found");
+    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
+
     await ctx.db.patch(visitId, {
       status: "approved",
       approvedAt: Date.now(),
@@ -331,8 +339,7 @@ export const approve = mutation({
     });
 
     // Send "booking confirmed" email to visitor
-    const visit = await ctx.db.get(visitId);
-    if (visit?.visitorEmail) {
+    if (visit.visitorEmail) {
       const host = visit.hostId ? await ctx.db.get(visit.hostId) : null;
       await ctx.scheduler.runAfter(0, internal.email.sendBookingConfirmed, {
         to: visit.visitorEmail,
@@ -348,10 +355,14 @@ export const approve = mutation({
   },
 });
 
-/** Legacy accept â€” maps to approved for backwards compat. */
+/** Legacy accept — maps to approved for backwards compat. */
 export const accept = mutation({
   args: { visitId: v.id("scheduledVisits") },
   handler: async (ctx, { visitId }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const visit = await ctx.db.get(visitId);
+    if (!visit) throw new Error("Visit not found");
+    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
     await ctx.db.patch(visitId, { status: "approved", approvedAt: Date.now() });
   },
 });
@@ -363,6 +374,10 @@ export const reject = mutation({
     reason: v.optional(v.string()),
   },
   handler: async (ctx, { visitId, reason }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const visit = await ctx.db.get(visitId);
+    if (!visit) throw new Error("Visit not found");
+    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
     await ctx.db.patch(visitId, {
       status: "rejected",
       cancelReason: reason,
@@ -371,24 +386,32 @@ export const reject = mutation({
   },
 });
 
-/** Legacy decline â€” maps to rejected. */
+/** Legacy decline — maps to rejected. */
 export const decline = mutation({
   args: { visitId: v.id("scheduledVisits") },
   handler: async (ctx, { visitId }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const visit = await ctx.db.get(visitId);
+    if (!visit) throw new Error("Visit not found");
+    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
     await ctx.db.patch(visitId, { status: "rejected", cancelledAt: Date.now() });
   },
 });
 
-/** Visitor has arrived at reception â€” mark checked_in. */
+/** Visitor has arrived at reception — mark checked_in. */
 export const markCheckedIn = mutation({
   args: { visitId: v.id("scheduledVisits") },
   handler: async (ctx, { visitId }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const visit = await ctx.db.get(visitId);
+    if (!visit) throw new Error("Visit not found");
+    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
+
     const now = Date.now();
     await ctx.db.patch(visitId, { status: "checked_in", checkedInAt: now });
 
     // Send smart check-in alert to host
-    const visit = await ctx.db.get(visitId);
-    if (visit?.hostId) {
+    if (visit.hostId) {
       const host = await ctx.db.get(visit.hostId);
       if (host?.email) {
         await ctx.scheduler.runAfter(0, internal.email.sendHostCheckInAlert, {
@@ -409,13 +432,13 @@ export const searchByVisitor = query({
   args: { slug: v.string(), search: v.string() },
   handler: async (ctx, { slug, search }) => {
     if (!search || search.trim().length < 2) return [];
-    const org = await ctx.db.query("organizations").withIndex("by_slug", q => q.eq("slug", slug)).first();
+    const org = await ctx.db.query("organizations").withIndex("by_slug", (q) => q.eq("slug", slug)).first();
     if (!org) return [];
     const term = search.toLowerCase().trim();
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const visits = await ctx.db
       .query("scheduledVisits")
-      .withIndex("by_org", q => q.eq("orgId", org._id))
+      .withIndex("by_org", (q) => q.eq("orgId", org._id))
       .collect();
     return visits.filter(v =>
       (v.status === "approved" || v.status === "pending") &&
@@ -429,6 +452,10 @@ export const searchByVisitor = query({
 export const markInMeeting = mutation({
   args: { visitId: v.id("scheduledVisits") },
   handler: async (ctx, { visitId }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const visit = await ctx.db.get(visitId);
+    if (!visit) throw new Error("Visit not found");
+    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
     await ctx.db.patch(visitId, { status: "in_meeting" });
   },
 });
@@ -437,6 +464,10 @@ export const markInMeeting = mutation({
 export const markCompleted = mutation({
   args: { visitId: v.id("scheduledVisits") },
   handler: async (ctx, { visitId }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const visit = await ctx.db.get(visitId);
+    if (!visit) throw new Error("Visit not found");
+    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
     await ctx.db.patch(visitId, { status: "completed", completedAt: Date.now() });
   },
 });
@@ -445,6 +476,10 @@ export const markCompleted = mutation({
 export const markNoShow = mutation({
   args: { visitId: v.id("scheduledVisits") },
   handler: async (ctx, { visitId }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const visit = await ctx.db.get(visitId);
+    if (!visit) throw new Error("Visit not found");
+    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
     await ctx.db.patch(visitId, { status: "no_show" });
   },
 });
@@ -456,6 +491,10 @@ export const cancel = mutation({
     reason: v.optional(v.string()),
   },
   handler: async (ctx, { visitId, reason }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const visit = await ctx.db.get(visitId);
+    if (!visit) throw new Error("Visit not found");
+    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
     await ctx.db.patch(visitId, {
       status: "cancelled",
       cancelledAt: Date.now(),
@@ -464,7 +503,7 @@ export const cancel = mutation({
   },
 });
 
-/** Reschedule â€” update date + reset to pending. */
+/** Reschedule — update date + reset to pending. */
 export const reschedule = mutation({
   args: {
     visitId: v.id("scheduledVisits"),
@@ -473,8 +512,10 @@ export const reschedule = mutation({
     notes: v.optional(v.string()),
   },
   handler: async (ctx, { visitId, scheduledDate, duration, notes }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
     const existing = await ctx.db.get(visitId);
     if (!existing) throw new Error("Visit not found");
+    if (existing.orgId) assertSameOrg(orgId, existing.orgId);
     await ctx.db.patch(visitId, {
       scheduledDate,
       duration,
@@ -489,6 +530,10 @@ export const reschedule = mutation({
 export const remove = mutation({
   args: { visitId: v.id("scheduledVisits") },
   handler: async (ctx, { visitId }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const visit = await ctx.db.get(visitId);
+    if (!visit) return;
+    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
     await ctx.db.delete(visitId);
   },
 });
@@ -497,11 +542,13 @@ export const remove = mutation({
 export const markReminderSent = mutation({
   args: { visitId: v.id("scheduledVisits") },
   handler: async (ctx, { visitId }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const visit = await ctx.db.get(visitId);
+    if (!visit) throw new Error("Visit not found");
+    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
     await ctx.db.patch(visitId, { reminderSent: true });
   },
 });
-
-
 
 /** Block a time slot for a staff member.
  *  This immediately propagates to all booking page subscribers. */
@@ -543,13 +590,12 @@ export const setAvailability = mutation({
   handler: async (ctx, { clerkUserId, availability }) => {
     const staffMember = await ctx.db
       .query("staff")
-      .filter((q) => q.eq(q.field("clerkUserId"), clerkUserId))
+      .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", clerkUserId))
       .first();
     if (!staffMember) throw new Error("Staff member not found");
     await ctx.db.patch(staffMember._id, { availability });
   },
 });
-
 
 export const updateStatus = mutation({
   args: {
@@ -562,6 +608,10 @@ export const updateStatus = mutation({
     ),
   },
   handler: async (ctx, { visitId, status }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const visit = await ctx.db.get(visitId);
+    if (!visit) throw new Error("Visit not found");
+    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
     await ctx.db.patch(visitId, { status });
   },
 });

@@ -1,4 +1,4 @@
-﻿import { httpRouter } from "convex/server";
+import { httpRouter } from "convex/server";
 import { httpAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { Webhook } from "svix";
@@ -45,7 +45,7 @@ http.route({
         (e) => (e as unknown as { id: string }).id === primaryEmailId
       );
 
-      const metadata = data.public_metadata as { role?: string } | undefined;
+      const metadata = data.public_metadata as { role?: string; orgId?: string } | undefined;
       const role = (metadata?.role ?? "employee") as
         | "admin"
         | "receptionist"
@@ -57,9 +57,10 @@ http.route({
       await ctx.runMutation(internal.users.upsertFromClerk, {
         clerkUserId: data.id as string,
         name: `${firstName} ${lastName}`.trim() || (primaryEmail?.email_address ?? "").split("@")[0],
-        email: primaryEmail?.email_address ?? "",
+        email: (primaryEmail?.email_address ?? "").toLowerCase().trim(),
         role,
         imageUrl: (data.image_url as string) ?? undefined,
+        orgId: metadata?.orgId,
       });
     }
 
@@ -71,7 +72,7 @@ http.route({
 
 
     if (type === "invitation.accepted") {
-      const email = (data.email_address as string) ?? "";
+      const email = ((data.email_address as string) ?? "").toLowerCase().trim();
       if (email) {
         await ctx.runMutation(internal.invites.markAccepted, { email });
         const clerkUserId = (data.user_id as string) ?? "";
