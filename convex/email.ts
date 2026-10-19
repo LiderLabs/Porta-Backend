@@ -15,7 +15,7 @@ async function sendEmail({
   if (!apiKey) throw new Error("Missing RESEND_API_KEY");
 
   const fromEmail = process.env.FROM_EMAIL ?? "noreply@porta.app";
-  const fromName  = process.env.FROM_NAME  ?? "Porta";
+  const fromName = process.env.FROM_NAME ?? "Porta";
 
   const res = await fetch("https://api.resend.com/emails", {
     method: "POST",
@@ -24,8 +24,8 @@ async function sendEmail({
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      from:    `${fromName} <${fromEmail}>`,
-      to:      [to],
+      from: `${fromName} <${fromEmail}>`,
+      to: [to],
       subject,
       html,
     }),
@@ -39,19 +39,31 @@ async function sendEmail({
   return await res.json();
 }
 
+// ── HTML escaping ─────────────────────────────────────────────────────────────
+// Visitor-supplied text (name, company, purpose, notes) ends up inside HTML emails
+// sent from our domain, so every inserted value must be escaped.
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 // ── Format helpers ────────────────────────────────────────────────────────────
 function formatDate(ts: number) {
   return new Date(ts).toLocaleDateString("en-GB", {
     weekday: "long",
-    day:     "numeric",
-    month:   "long",
-    year:    "numeric",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
   });
 }
 
 function formatTime(ts: number) {
   return new Date(ts).toLocaleTimeString("en-GB", {
-    hour:   "2-digit",
+    hour: "2-digit",
     minute: "2-digit",
   });
 }
@@ -59,13 +71,13 @@ function formatTime(ts: number) {
 // ── Email 1: Booking received (sent immediately when visitor books) ────────────
 export const sendBookingReceived = internalAction({
   args: {
-    to:             v.string(),   // visitor email
-    visitorName:    v.string(),
-    hostName:       v.optional(v.string()),
-    scheduledDate:  v.number(),   // epoch ms
-    purpose:        v.optional(v.string()),
+    to: v.string(),   // visitor email
+    visitorName: v.string(),
+    hostName: v.optional(v.string()),
+    scheduledDate: v.number(),   // epoch ms
+    purpose: v.optional(v.string()),
     visitorCompany: v.optional(v.string()),
-    notes:          v.optional(v.string()),
+    notes: v.optional(v.string()),
   },
   handler: async (_ctx, args) => {
     const dateStr = formatDate(args.scheduledDate);
@@ -92,7 +104,7 @@ export const sendBookingReceived = internalAction({
         <!-- Body -->
         <tr>
           <td style="padding:32px 36px;">
-            <p style="margin:0 0 20px;font-size:16px;color:#1f2328;">Hi <strong>${args.visitorName}</strong>,</p>
+            <p style="margin:0 0 20px;font-size:16px;color:#1f2328;">Hi <strong>${escapeHtml(args.visitorName)}</strong>,</p>
             <p style="margin:0 0 24px;font-size:15px;color:#656d76;line-height:1.6;">
               Your visit request has been received and is currently <strong style="color:#d29922;">pending review</strong>.
               Our team will confirm it shortly — you'll get another email once it's approved.
@@ -104,10 +116,10 @@ export const sendBookingReceived = internalAction({
                 <div style="font-size:11px;font-weight:700;color:#9ba3ac;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:14px;">Visit Details</div>
                 ${row("📅 Date", dateStr)}
                 ${row("🕐 Time", timeStr)}
-                ${args.hostName    ? row("👤 Host",    args.hostName)    : ""}
-                ${args.purpose     ? row("📋 Purpose", args.purpose)     : ""}
+                ${args.hostName ? row("👤 Host", args.hostName) : ""}
+                ${args.purpose ? row("📋 Purpose", args.purpose) : ""}
                 ${args.visitorCompany ? row("🏢 Company", args.visitorCompany) : ""}
-                ${args.notes       ? row("📝 Notes",   args.notes)       : ""}
+                ${args.notes ? row("📝 Notes", args.notes) : ""}
               </td></tr>
             </table>
 
@@ -131,7 +143,7 @@ export const sendBookingReceived = internalAction({
 </html>`;
 
     await sendEmail({
-      to:      args.to,
+      to: args.to,
       subject: `📋 Booking received — ${dateStr} at ${timeStr}`,
       html,
     });
@@ -143,14 +155,14 @@ export const sendBookingReceived = internalAction({
 // ── Email 2: Booking confirmed (sent when receptionist approves) ───────────────
 export const sendBookingConfirmed = internalAction({
   args: {
-    to:             v.string(),
-    visitorName:    v.string(),
-    hostName:       v.optional(v.string()),
-    scheduledDate:  v.number(),
-    purpose:        v.optional(v.string()),
+    to: v.string(),
+    visitorName: v.string(),
+    hostName: v.optional(v.string()),
+    scheduledDate: v.number(),
+    purpose: v.optional(v.string()),
     visitorCompany: v.optional(v.string()),
-    notes:          v.optional(v.string()),
-    approvedBy:     v.optional(v.string()),
+    notes: v.optional(v.string()),
+    approvedBy: v.optional(v.string()),
   },
   handler: async (_ctx, args) => {
     const dateStr = formatDate(args.scheduledDate);
@@ -177,7 +189,7 @@ export const sendBookingConfirmed = internalAction({
         <!-- Body -->
         <tr>
           <td style="padding:32px 36px;">
-            <p style="margin:0 0 20px;font-size:16px;color:#1f2328;">Hi <strong>${args.visitorName}</strong>,</p>
+            <p style="margin:0 0 20px;font-size:16px;color:#1f2328;">Hi <strong>${escapeHtml(args.visitorName)}</strong>,</p>
             <p style="margin:0 0 24px;font-size:15px;color:#656d76;line-height:1.6;">
               Great news — your visit has been <strong style="color:#1a7f37;">approved</strong>!
               Please make sure to arrive on time and report to reception when you get here.
@@ -187,12 +199,12 @@ export const sendBookingConfirmed = internalAction({
             <table width="100%" cellpadding="0" cellspacing="0" style="background:#f0faf2;border-radius:10px;border:1px solid #a8ddb5;margin-bottom:24px;">
               <tr><td style="padding:20px 24px;">
                 <div style="font-size:11px;font-weight:700;color:#2da44e;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:14px;">Confirmed Visit Details</div>
-                ${row("📅 Date",    dateStr)}
-                ${row("🕐 Time",    timeStr)}
-                ${args.hostName    ? row("👤 Host",    args.hostName)    : ""}
-                ${args.purpose     ? row("📋 Purpose", args.purpose)     : ""}
+                ${row("📅 Date", dateStr)}
+                ${row("🕐 Time", timeStr)}
+                ${args.hostName ? row("👤 Host", args.hostName) : ""}
+                ${args.purpose ? row("📋 Purpose", args.purpose) : ""}
                 ${args.visitorCompany ? row("🏢 Company", args.visitorCompany) : ""}
-                ${args.notes       ? row("📝 Notes",   args.notes)       : ""}
+                ${args.notes ? row("📝 Notes", args.notes) : ""}
               </td></tr>
             </table>
 
@@ -201,8 +213,8 @@ export const sendBookingConfirmed = internalAction({
               <tr><td style="padding:20px 24px;">
                 <div style="font-size:13px;font-weight:700;color:#1f2328;margin-bottom:12px;">When you arrive</div>
                 ${step("1", "Head to the reception desk")}
-                ${step("2", "Give your name — <strong>" + args.visitorName + "</strong>")}
-                ${step("3", args.hostName ? `Ask for <strong>${args.hostName}</strong>` : "The receptionist will direct you")}
+                ${step("2", "Give your name — <strong>" + escapeHtml(args.visitorName) + "</strong>")}
+                ${step("3", args.hostName ? `Ask for <strong>${escapeHtml(args.hostName)}</strong>` : "The receptionist will direct you")}
               </td></tr>
             </table>
 
@@ -232,7 +244,7 @@ export const sendBookingConfirmed = internalAction({
 </html>`;
 
     await sendEmail({
-      to:      args.to,
+      to: args.to,
       subject: `✅ Visit confirmed — ${dateStr} at ${timeStr}`,
       html,
     });
@@ -247,7 +259,7 @@ function row(label: string, value: string) {
     <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:10px;">
       <tr>
         <td width="120" style="font-size:13px;color:#9ba3ac;vertical-align:top;padding-right:8px;">${label}</td>
-        <td style="font-size:13px;color:#1f2328;font-weight:600;">${value}</td>
+        <td style="font-size:13px;color:#1f2328;font-weight:600;">${escapeHtml(value)}</td>
       </tr>
     </table>`;
 }
@@ -275,32 +287,32 @@ function outlookCalendarLink(title: string, start: number, end: number, desc: st
 // ── Email 3: Host check-in notification ───────────────────────────────────────
 export const sendHostCheckInAlert = internalAction({
   args: {
-    to:             v.string(),
-    hostName:       v.string(),
-    visitorName:    v.string(),
+    to: v.string(),
+    hostName: v.string(),
+    visitorName: v.string(),
     visitorCompany: v.optional(v.string()),
-    purpose:        v.optional(v.string()),
-    scheduledDate:  v.number(),
-    checkedInAt:    v.number(),
+    purpose: v.optional(v.string()),
+    scheduledDate: v.number(),
+    checkedInAt: v.number(),
   },
   handler: async (_ctx, args) => {
-    const apptTime    = formatTime(args.scheduledDate);
+    const apptTime = formatTime(args.scheduledDate);
     const checkinTime = formatTime(args.checkedInAt);
-    const diffMins    = Math.round((args.checkedInAt - args.scheduledDate) / 60000);
+    const diffMins = Math.round((args.checkedInAt - args.scheduledDate) / 60000);
 
     let timingMsg: string;
     let timingColor: string;
     if (diffMins <= 0) {
       const early = Math.abs(diffMins);
-      timingMsg   = early <= 2
+      timingMsg = early <= 2
         ? `right on time for your <strong>${apptTime}</strong> appointment.`
         : `<strong>${early} minutes early</strong> for your <strong>${apptTime}</strong> appointment.`;
       timingColor = "#1a7f37";
     } else if (diffMins <= 10) {
-      timingMsg   = `<strong>${diffMins} minutes late</strong> for your <strong>${apptTime}</strong> appointment.`;
+      timingMsg = `<strong>${diffMins} minutes late</strong> for your <strong>${apptTime}</strong> appointment.`;
       timingColor = "#d29922";
     } else {
-      timingMsg   = `<strong>${diffMins} minutes late</strong> for your <strong>${apptTime}</strong> appointment.`;
+      timingMsg = `<strong>${diffMins} minutes late</strong> for your <strong>${apptTime}</strong> appointment.`;
       timingColor = "#cf222e";
     }
 
@@ -325,9 +337,9 @@ export const sendHostCheckInAlert = internalAction({
         </tr>
         <tr>
           <td style="padding:32px 36px;">
-            <p style="margin:0 0 20px;font-size:16px;color:#1f2328;">Hello <strong>${args.hostName}</strong>,</p>
+            <p style="margin:0 0 20px;font-size:16px;color:#1f2328;">Hello <strong>${escapeHtml(args.hostName)}</strong>,</p>
             <p style="margin:0 0 24px;font-size:16px;color:#1f2328;line-height:1.7;">
-              <strong>${visitorLabel}</strong> is here to see you — ${timingMsg}
+              <strong>${escapeHtml(visitorLabel)}</strong> is here to see you — ${timingMsg}
             </p>
             <div style="text-align:center;margin-bottom:24px;">
               <span style="display:inline-block;padding:8px 20px;background:${timingColor}18;color:${timingColor};border:1px solid ${timingColor}40;border-radius:999px;font-size:13px;font-weight:600;">
@@ -337,9 +349,9 @@ export const sendHostCheckInAlert = internalAction({
             <table width="100%" cellpadding="0" cellspacing="0" style="background:#f6f8fa;border-radius:10px;border:1px solid #d0d7de;margin-bottom:24px;">
               <tr><td style="padding:20px 24px;">
                 <div style="font-size:11px;font-weight:700;color:#9ba3ac;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:14px;">Visit Details</div>
-                ${row("👤 Visitor",     visitorLabel)}
+                ${row("👤 Visitor", visitorLabel)}
                 ${row("🕐 Appointment", apptTime)}
-                ${row("✅ Arrived at",  checkinTime)}
+                ${row("✅ Arrived at", checkinTime)}
                 ${args.purpose ? row("📋 Purpose", args.purpose) : ""}
               </td></tr>
             </table>
@@ -360,7 +372,7 @@ export const sendHostCheckInAlert = internalAction({
 </html>`;
 
     await sendEmail({
-      to:      args.to,
+      to: args.to,
       subject: `🔔 ${args.visitorName} is here for your ${apptTime} appointment`,
       html,
     });

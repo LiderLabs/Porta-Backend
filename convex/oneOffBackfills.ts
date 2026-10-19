@@ -157,6 +157,36 @@ export const backfillInvitesOrgId = internalMutation({
   },
 });
 
+export const backfillScheduledVisitsOrgId = internalMutation({
+  args: { cursor: v.optional(v.string()) },
+  handler: async (ctx, { cursor }) => {
+    // Only fall back to "the one org" if exactly one org exists.
+    const orgs = await ctx.db.query("organizations").take(2);
+    const onlyOrg = orgs.length === 1 ? (orgs[0]._id as string) : undefined;
+
+    const page = await ctx.db.query("scheduledVisits")
+      .paginate({ numItems: 200, cursor: cursor ?? null });
+    let fixed = 0, unresolved = 0;
+    for (const row of page.page) {
+      if (row.orgId) continue;
+      let orgId = onlyOrg;
+      if (row.hostId) {
+        const host = await ctx.db.get(row.hostId);
+        if (host?.orgId) orgId = host.orgId;
+      }
+      if (!orgId) { unresolved++; continue; }   // never guess
+      await ctx.db.patch(row._id, { orgId });
+      fixed++;
+    }
+    if (!page.isDone) {
+      await ctx.scheduler.runAfter(0,
+        internal.oneOffBackfills.backfillScheduledVisitsOrgId,
+        { cursor: page.continueCursor });
+    }
+    return { fixed, unresolved, done: page.isDone };
+  },
+});
+
 export const countMissingOrgId = internalQuery({
   args: {},
   handler: async (ctx) => {
@@ -164,12 +194,14 @@ export const countMissingOrgId = internalQuery({
     const blacklist = await ctx.db.query("blacklist").collect();
     const staff = await ctx.db.query("staff").collect();
     const invites = await ctx.db.query("invites").collect();
+    const scheduledVisits = await ctx.db.query("scheduledVisits").collect();
 
     return {
       visitorsWithoutOrg: visitors.filter((v) => !v.orgId).length,
       blacklistWithoutOrg: blacklist.filter((b) => !b.orgId).length,
       staffWithoutOrg: staff.filter((s) => !s.orgId).length,
       invitesWithoutOrg: invites.filter((i) => !i.orgId).length,
+      scheduledVisitsWithoutOrg: scheduledVisits.filter((s) => !s.orgId).length,
       staffUnnormalizedEmails: staff.filter((s) => s.email && s.email !== s.email.toLowerCase().trim()).length,
       invitesUnnormalizedEmails: invites.filter((i) => i.email !== i.email.toLowerCase().trim()).length,
     };
