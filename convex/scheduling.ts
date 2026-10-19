@@ -1,20 +1,16 @@
 import { resolveOrgId } from "./getOrgId";
-﻿import { query, mutation } from "./_generated/server";
-import { api } from "./_generated/api";
+import { query, mutation } from "./_generated/server";
+import { api, internal } from "./_generated/api";
 import { v } from "convex/values";
 
-// â”€â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/** Resolve hostName for a visit row. */
 async function withHostName(ctx: any, visit: any) {
   if (!visit.hostId) return { ...visit, hostName: null };
   const s = await ctx.db.get(visit.hostId);
   return { ...visit, hostName: s?.name ?? null };
 }
 
-// â”€â”€â”€ queries â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/** All visits â€” used by receptionist. Convex auto-invalidates on any write. */
 export const list = query({
   args: {},
   handler: async (ctx) => {
@@ -46,19 +42,11 @@ export const listByStaff = query({
   },
 });
 
-/**
- * LIVE CALENDAR â€” returns all scheduled visits + blocked slots for a date range.
- * Both the receptionist calendar AND the booking page subscribe to this via
- * useQuery (Convex real-time). Any write to scheduledVisits or blockedSlots
- * immediately re-runs this and pushes fresh data to all subscribers.
- *
- * rangeStart / rangeEnd are epoch ms for the month being viewed.
- */
 export const getLiveCalendar = query({
   args: {
     rangeStart: v.number(),
-    rangeEnd:   v.number(),
-    hostId:     v.optional(v.id("staff")),
+    rangeEnd: v.number(),
+    hostId: v.optional(v.id("staff")),
   },
   handler: async (ctx, { rangeStart, rangeEnd, hostId }) => {
     // Visits in range
@@ -70,8 +58,8 @@ export const getLiveCalendar = query({
       .collect();
 
     if (hostId) visits = visits.filter((v) => v.hostId === hostId);
-      const orgId = await resolveOrgId(ctx);
-      if (orgId) visits = visits.filter((v: any) => v.orgId === orgId);
+    const orgId = await resolveOrgId(ctx);
+    if (orgId) visits = visits.filter((v: any) => v.orgId === orgId);
 
     // Blocked slots in range
     let blocked = await ctx.db
@@ -100,22 +88,18 @@ export const getLiveCalendar = query({
   },
 });
 
-/**
- * Check whether a proposed time slot conflicts with existing approved visits
- * OR blocked slots for a given host.
- * Returns list of conflicts so the UI can warn the user.
- */
+
 export const checkConflicts = query({
   args: {
-    hostId:        v.id("staff"),
+    hostId: v.id("staff"),
     proposedStart: v.number(),
-    proposedEnd:   v.number(),
+    proposedEnd: v.number(),
     excludeVisitId: v.optional(v.id("scheduledVisits")),
   },
   handler: async (ctx, { hostId, proposedStart, proposedEnd, excludeVisitId }) => {
-    const duration = 60 * 60 * 1000; // default 1h window
+    const duration = 60 * 60 * 1000;
 
-    // Check scheduled visits
+
     const visits = await ctx.db
       .query("scheduledVisits")
       .withIndex("by_hostId", (q) => q.eq("hostId", hostId))
@@ -128,7 +112,7 @@ export const checkConflicts = query({
       return proposedStart < vEnd && proposedEnd > v.scheduledDate;
     });
 
-    // Check blocked slots
+
     const blocked = await ctx.db
       .query("blockedSlots")
       .withIndex("by_staff", (q) => q.eq("staffId", hostId))
@@ -146,7 +130,7 @@ export const checkConflicts = query({
   },
 });
 
-/** Upcoming visits for a staff member in next 24 hours (used by staff home). */
+
 export const getUpcoming = query({
   args: { clerkUserId: v.string() },
   handler: async (ctx, { clerkUserId }) => {
@@ -155,7 +139,7 @@ export const getUpcoming = query({
       .filter((q) => q.eq(q.field("clerkUserId"), clerkUserId))
       .first();
     if (!staffMember) return [];
-    const now   = Date.now();
+    const now = Date.now();
     const in24h = now + 24 * 60 * 60 * 1000;
     const visits = await ctx.db
       .query("scheduledVisits")
@@ -176,8 +160,8 @@ export const getTodayForReceptionist = query({
   args: {},
   handler: async (ctx) => {
     const start = new Date(); start.setHours(0, 0, 0, 0);
-    const end   = new Date(); end.setHours(23, 59, 59, 999);
-    const all   = await ctx.db
+    const end = new Date(); end.setHours(23, 59, 59, 999);
+    const all = await ctx.db
       .query("scheduledVisits")
       .withIndex("by_scheduledDate", (q) =>
         q.gte("scheduledDate", start.getTime()).lte("scheduledDate", end.getTime()),
@@ -224,31 +208,31 @@ export const listStaffPublic = query({
     return staff
       .filter((s) => s.status !== "inactive")
       .map((s) => ({
-        _id:          s._id,
-        name:         s.name,
-        department:   s.department,
-        title:        s.title,
+        _id: s._id,
+        name: s.name,
+        department: s.department,
+        title: s.title,
         availability: s.availability ?? "available",
       }));
   },
 });
 
-// â”€â”€â”€ mutations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
 
 /** Create a new scheduled visit (receptionist / admin). */
 export const create = mutation({
   args: {
-    visitorName:     v.string(),
-    visitorEmail:    v.optional(v.string()),
-    visitorPhone:    v.optional(v.string()),
-    visitorCompany:  v.optional(v.string()),
-    purpose:         v.optional(v.string()),
-    hostStaffId:     v.optional(v.id("staff")),
-    scheduledDate:   v.number(),
-    duration:        v.optional(v.number()),
-    notes:           v.optional(v.string()),
+    visitorName: v.string(),
+    visitorEmail: v.optional(v.string()),
+    visitorPhone: v.optional(v.string()),
+    visitorCompany: v.optional(v.string()),
+    purpose: v.optional(v.string()),
+    hostStaffId: v.optional(v.id("staff")),
+    scheduledDate: v.number(),
+    duration: v.optional(v.number()),
+    notes: v.optional(v.string()),
     roomId: v.optional(v.id("rooms")),
-    source:          v.optional(v.union(v.literal("walkin"), v.literal("online"), v.literal("admin"))),
+    source: v.optional(v.union(v.literal("walkin"), v.literal("online"), v.literal("admin"))),
   },
   handler: async (ctx, args) => {
     const { hostStaffId, ...rest } = args;
@@ -263,16 +247,16 @@ export const create = mutation({
 /** Public booking from the external booking page. */
 export const publicBook = mutation({
   args: {
-    visitorName:    v.string(),
-    visitorEmail:   v.optional(v.string()),
-    visitorPhone:   v.optional(v.string()),
+    visitorName: v.string(),
+    visitorEmail: v.optional(v.string()),
+    visitorPhone: v.optional(v.string()),
     visitorCompany: v.optional(v.string()),
-    purpose:        v.optional(v.string()),
-    hostStaffId:    v.optional(v.id("staff")),
-    scheduledDate:  v.number(),
-    duration:       v.optional(v.number()),
-    notes:          v.optional(v.string()),
-    orgSlug:        v.optional(v.string()),
+    purpose: v.optional(v.string()),
+    hostStaffId: v.optional(v.id("staff")),
+    scheduledDate: v.number(),
+    duration: v.optional(v.number()),
+    notes: v.optional(v.string()),
+    orgSlug: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const { hostStaffId, orgSlug, ...rest } = args;
@@ -294,14 +278,14 @@ export const publicBook = mutation({
     if (hostStaffId) {
       const duration = args.duration ?? 60;
       const newStart = args.scheduledDate;
-      const newEnd   = newStart + duration * 60 * 1000;
+      const newEnd = newStart + duration * 60 * 1000;
       const existing = await ctx.db.query("scheduledVisits")
         .filter(q => q.eq(q.field("hostId"), hostStaffId))
         .collect();
       const conflict = existing.find(v => {
-        if (!["pending","approved","checked_in","in_meeting"].includes(v.status)) return false;
+        if (!["pending", "approved", "checked_in", "in_meeting"].includes(v.status)) return false;
         const vStart = v.scheduledDate;
-        const vEnd   = vStart + (v.duration ?? 60) * 60 * 1000;
+        const vEnd = vStart + (v.duration ?? 60) * 60 * 1000;
         return newStart < vEnd && newEnd > vStart;
       });
       if (conflict) throw new Error("That time slot is already booked for this person. Please choose a different time.");
@@ -317,14 +301,14 @@ export const publicBook = mutation({
 
     // Send "booking received" email to visitor (only if they gave an email)
     if (args.visitorEmail) {
-      await ctx.scheduler.runAfter(0, api.email.sendBookingReceived, {
-        to:             args.visitorEmail,
-        visitorName:    args.visitorName,
-        hostName:       host?.name ?? undefined,
-        scheduledDate:  args.scheduledDate,
-        purpose:        args.purpose        ?? undefined,
+      await ctx.scheduler.runAfter(0, internal.email.sendBookingReceived, {
+        to: args.visitorEmail,
+        visitorName: args.visitorName,
+        hostName: host?.name ?? undefined,
+        scheduledDate: args.scheduledDate,
+        purpose: args.purpose ?? undefined,
         visitorCompany: args.visitorCompany ?? undefined,
-        notes:          args.notes          ?? undefined,
+        notes: args.notes ?? undefined,
       });
     }
 
@@ -332,19 +316,16 @@ export const publicBook = mutation({
   },
 });
 
-// â”€â”€ Status transition mutations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Each is a separate mutation so it's clear in the audit trail.
-
 /** Receptionist or admin approves a pending visit. */
 export const approve = mutation({
   args: {
-    visitId:      v.id("scheduledVisits"),
+    visitId: v.id("scheduledVisits"),
     actorClerkId: v.optional(v.string()),
-    actorName:    v.optional(v.string()),
+    actorName: v.optional(v.string()),
   },
   handler: async (ctx, { visitId, actorClerkId, actorName }) => {
     await ctx.db.patch(visitId, {
-      status:     "approved",
+      status: "approved",
       approvedAt: Date.now(),
       approvedBy: actorName ?? actorClerkId ?? "receptionist",
     });
@@ -353,15 +334,15 @@ export const approve = mutation({
     const visit = await ctx.db.get(visitId);
     if (visit?.visitorEmail) {
       const host = visit.hostId ? await ctx.db.get(visit.hostId) : null;
-      await ctx.scheduler.runAfter(0, api.email.sendBookingConfirmed, {
-        to:             visit.visitorEmail,
-        visitorName:    visit.visitorName,
-        hostName:       host?.name          ?? undefined,
-        scheduledDate:  visit.scheduledDate,
-        purpose:        visit.purpose        ?? undefined,
+      await ctx.scheduler.runAfter(0, internal.email.sendBookingConfirmed, {
+        to: visit.visitorEmail,
+        visitorName: visit.visitorName,
+        hostName: host?.name ?? undefined,
+        scheduledDate: visit.scheduledDate,
+        purpose: visit.purpose ?? undefined,
         visitorCompany: visit.visitorCompany ?? undefined,
-        notes:          visit.notes          ?? undefined,
-        approvedBy:     actorName            ?? undefined,
+        notes: visit.notes ?? undefined,
+        approvedBy: actorName ?? undefined,
       });
     }
   },
@@ -378,14 +359,14 @@ export const accept = mutation({
 /** Reject a visit (was pending/approved). */
 export const reject = mutation({
   args: {
-    visitId:      v.id("scheduledVisits"),
-    reason:       v.optional(v.string()),
+    visitId: v.id("scheduledVisits"),
+    reason: v.optional(v.string()),
   },
   handler: async (ctx, { visitId, reason }) => {
     await ctx.db.patch(visitId, {
-      status:       "rejected",
+      status: "rejected",
       cancelReason: reason,
-      cancelledAt:  Date.now(),
+      cancelledAt: Date.now(),
     });
   },
 });
@@ -410,14 +391,14 @@ export const markCheckedIn = mutation({
     if (visit?.hostId) {
       const host = await ctx.db.get(visit.hostId);
       if (host?.email) {
-        await ctx.scheduler.runAfter(0, api.email.sendHostCheckInAlert, {
-          to:             host.email,
-          hostName:       host.name,
-          visitorName:    visit.visitorName,
+        await ctx.scheduler.runAfter(0, internal.email.sendHostCheckInAlert, {
+          to: host.email,
+          hostName: host.name,
+          visitorName: visit.visitorName,
           visitorCompany: visit.visitorCompany ?? undefined,
-          purpose:        visit.purpose        ?? undefined,
-          scheduledDate:  visit.scheduledDate,
-          checkedInAt:    now,
+          purpose: visit.purpose ?? undefined,
+          scheduledDate: visit.scheduledDate,
+          checkedInAt: now,
         });
       }
     }
@@ -428,13 +409,13 @@ export const searchByVisitor = query({
   args: { slug: v.string(), search: v.string() },
   handler: async (ctx, { slug, search }) => {
     if (!search || search.trim().length < 2) return [];
-    const org = await ctx.db.query("orgSettings").filter(q => q.eq(q.field("slug"), slug)).first();
+    const org = await ctx.db.query("organizations").withIndex("by_slug", q => q.eq("slug", slug)).first();
     if (!org) return [];
     const term = search.toLowerCase().trim();
-    const today = new Date(); today.setHours(0,0,0,0);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
     const visits = await ctx.db
       .query("scheduledVisits")
-      .filter(q => q.eq(q.field("orgId"), org.orgId))
+      .withIndex("by_org", q => q.eq("orgId", org._id))
       .collect();
     return visits.filter(v =>
       (v.status === "approved" || v.status === "pending") &&
@@ -472,12 +453,12 @@ export const markNoShow = mutation({
 export const cancel = mutation({
   args: {
     visitId: v.id("scheduledVisits"),
-    reason:  v.optional(v.string()),
+    reason: v.optional(v.string()),
   },
   handler: async (ctx, { visitId, reason }) => {
     await ctx.db.patch(visitId, {
-      status:       "cancelled",
-      cancelledAt:  Date.now(),
+      status: "cancelled",
+      cancelledAt: Date.now(),
       cancelReason: reason,
     });
   },
@@ -486,10 +467,10 @@ export const cancel = mutation({
 /** Reschedule â€” update date + reset to pending. */
 export const reschedule = mutation({
   args: {
-    visitId:       v.id("scheduledVisits"),
+    visitId: v.id("scheduledVisits"),
     scheduledDate: v.number(),
-    duration:      v.optional(v.number()),
-    notes:         v.optional(v.string()),
+    duration: v.optional(v.number()),
+    notes: v.optional(v.string()),
   },
   handler: async (ctx, { visitId, scheduledDate, duration, notes }) => {
     const existing = await ctx.db.get(visitId);
@@ -498,7 +479,7 @@ export const reschedule = mutation({
       scheduledDate,
       duration,
       notes,
-      status:          "pending",
+      status: "pending",
       rescheduledFrom: existing.scheduledDate,
     });
   },
@@ -520,17 +501,17 @@ export const markReminderSent = mutation({
   },
 });
 
-// â”€â”€ Blocked slots mutations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
 
 /** Block a time slot for a staff member.
  *  This immediately propagates to all booking page subscribers. */
 export const blockSlot = mutation({
   args: {
-    staffId:         v.id("staff"),
-    startTime:       v.number(),
-    endTime:         v.number(),
-    reason:          v.optional(v.string()),
-    createdByClerkId:v.string(),
+    staffId: v.id("staff"),
+    startTime: v.number(),
+    endTime: v.number(),
+    reason: v.optional(v.string()),
+    createdByClerkId: v.string(),
   },
   handler: async (ctx, args) => {
     return await ctx.db.insert("blockedSlots", {
@@ -548,12 +529,10 @@ export const unblockSlot = mutation({
   },
 });
 
-// â”€â”€ Staff availability toggle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 /** Staff toggle their live availability status. */
 export const setAvailability = mutation({
   args: {
-    clerkUserId:  v.string(),
+    clerkUserId: v.string(),
     availability: v.union(
       v.literal("available"),
       v.literal("busy"),
@@ -571,7 +550,7 @@ export const setAvailability = mutation({
   },
 });
 
-// â”€â”€ legacy updateStatus kept for any existing callers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
 export const updateStatus = mutation({
   args: {
     visitId: v.id("scheduledVisits"),
@@ -590,19 +569,19 @@ export const updateStatus = mutation({
 export const listAllBlockedSlots = query({
   args: {},
   handler: async (ctx) => {
-    const now   = Date.now();
+    const now = Date.now();
     const slots = await ctx.db.query("blockedSlots").collect();
     return slots
       .filter((s) => s.endTime >= now)
       .map((s) => ({
-        _id:          s._id,
-        staffId:      s.staffId,
-        startTime:    s.startTime,
-        endTime:      s.endTime,
-        reason:       s.reason,
-        date:         new Date(s.startTime).toISOString().split("T")[0],
+        _id: s._id,
+        staffId: s.staffId,
+        startTime: s.startTime,
+        endTime: s.endTime,
+        reason: s.reason,
+        date: new Date(s.startTime).toISOString().split("T")[0],
         startTimeStr: new Date(s.startTime).toTimeString().slice(0, 5),
-        endTimeStr:   new Date(s.endTime).toTimeString().slice(0, 5),
+        endTimeStr: new Date(s.endTime).toTimeString().slice(0, 5),
       }));
   },
 });
@@ -612,7 +591,7 @@ export const listApprovedVisits = query({
   args: {},
   handler: async (ctx) => {
     const todayStart = new Date();
-    todayStart.setHours(0,0,0,0);
+    todayStart.setHours(0, 0, 0, 0);
     const visits = await ctx.db
       .query("scheduledVisits")
       .withIndex("by_scheduledDate", (q) => q.gte("scheduledDate", todayStart.getTime()))
@@ -620,33 +599,33 @@ export const listApprovedVisits = query({
     return visits
       .filter((v) => ["approved", "checked_in", "in_meeting", "accepted"].includes(v.status))
       .map((v) => ({
-        _id:            v._id,
-        hostStaffId:    v.hostId,
-        hostId:         v.hostId,
-        scheduledDate:  v.scheduledDate,
-        duration:       v.duration ?? 60,
-        visitorName:    v.visitorName,
-        visitorEmail:   v.visitorEmail  ?? "",
-        visitorPhone:   v.visitorPhone  ?? "",
+        _id: v._id,
+        hostStaffId: v.hostId,
+        hostId: v.hostId,
+        scheduledDate: v.scheduledDate,
+        duration: v.duration ?? 60,
+        visitorName: v.visitorName,
+        visitorEmail: v.visitorEmail ?? "",
+        visitorPhone: v.visitorPhone ?? "",
         visitorCompany: v.visitorCompany ?? "",
-        purpose:        v.purpose       ?? "",
-        status:         v.status,
-        orgId:          v.orgId         ?? "",
+        purpose: v.purpose ?? "",
+        status: v.status,
+        orgId: v.orgId ?? "",
       }));
   },
 });
 /** Create a visit directly by staff member - auto-approved, no approval needed. */
 export const createByStaff = mutation({
   args: {
-    visitorName:     v.string(),
-    visitorEmail:    v.optional(v.string()),
-    visitorPhone:    v.optional(v.string()),
-    visitorCompany:  v.optional(v.string()),
-    purpose:         v.optional(v.string()),
-    hostStaffId:     v.optional(v.id("staff")),
-    scheduledDate:   v.number(),
-    duration:        v.optional(v.number()),
-    notes:           v.optional(v.string()),
+    visitorName: v.string(),
+    visitorEmail: v.optional(v.string()),
+    visitorPhone: v.optional(v.string()),
+    visitorCompany: v.optional(v.string()),
+    purpose: v.optional(v.string()),
+    hostStaffId: v.optional(v.id("staff")),
+    scheduledDate: v.number(),
+    duration: v.optional(v.number()),
+    notes: v.optional(v.string()),
     roomId: v.optional(v.id("rooms")),
   },
   handler: async (ctx, args) => {
@@ -656,8 +635,8 @@ export const createByStaff = mutation({
       hostId: hostStaffId,
       status: "approved",
       approvedAt: Date.now(),
-        approvedBy: "staff",
-        source: "staff",
+      approvedBy: "staff",
+      source: "staff",
     });
   },
 });
@@ -666,15 +645,15 @@ export const createByStaff = mutation({
 
 export const createByPA = mutation({
   args: {
-    visitorName:     v.string(),
-    visitorEmail:    v.optional(v.string()),
-    visitorPhone:    v.optional(v.string()),
-    visitorCompany:  v.optional(v.string()),
-    purpose:         v.optional(v.string()),
-    hostStaffId:     v.optional(v.id("staff")),
-    scheduledDate:   v.number(),
-    duration:        v.optional(v.number()),
-    notes:           v.optional(v.string()),
+    visitorName: v.string(),
+    visitorEmail: v.optional(v.string()),
+    visitorPhone: v.optional(v.string()),
+    visitorCompany: v.optional(v.string()),
+    purpose: v.optional(v.string()),
+    hostStaffId: v.optional(v.id("staff")),
+    scheduledDate: v.number(),
+    duration: v.optional(v.number()),
+    notes: v.optional(v.string()),
     roomId: v.optional(v.id("rooms")),
   },
   handler: async (ctx, args) => {
@@ -706,5 +685,3 @@ export const listByOrg = query({
       });
   },
 });
-
-

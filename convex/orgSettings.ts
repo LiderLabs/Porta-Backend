@@ -1,6 +1,7 @@
-﻿import { query, mutation } from "./_generated/server";
+import { query, mutation } from "./_generated/server";
 import { resolveOrgId } from "./getOrgId";
 import { v } from "convex/values";
+import { requireAdmin } from "./authHelpers";
 
 const DEFAULTS = {
   features: {
@@ -65,6 +66,7 @@ export const save = mutation({
     })),
   },
   handler: async (ctx, args) => {
+    await requireAdmin(ctx);
     const existing = await ctx.db.query("orgSettings").first();
     if (existing) {
       await ctx.db.patch(existing._id, { ...args, updatedAt: Date.now() });
