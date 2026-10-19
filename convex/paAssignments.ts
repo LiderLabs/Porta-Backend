@@ -86,9 +86,11 @@ export const getStaffForPA = query({
       .query("staff")
       .filter((q) => q.eq(q.field("clerkUserId"), identity.subject))
       .first();
-
     const role = callerStaff?.role;
-    if (role !== "admin" && role !== "superadmin" && role !== "pa") {
+    // staff.role cannot be "superadmin" — superadmin lives on the user/Clerk
+    // side, not the staff record (see schema.ts staff table). Only admin and
+    // PA can call this (per docstring above).
+    if (role !== "admin" && role !== "pa") {
       throw new Error("Not authorized");
     }
 
