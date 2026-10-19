@@ -25,7 +25,7 @@ export const send = mutation({
     // Resolve sender's own name and role from their staff or user record.
     const staff = await ctx.db
       .query("staff")
-      .filter((q) => q.eq(q.field("clerkUserId"), identity.subject))
+      .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", identity.subject))
       .first();
     const user = !staff
       ? await ctx.db

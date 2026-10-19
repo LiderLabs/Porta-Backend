@@ -9,15 +9,11 @@ export const list = query({
   handler: async (ctx) => {
     const orgId = await resolveOrgId(ctx);
     if (!orgId) return [];
-    const direct = (await ctx.db.query("staff").withIndex("by_org", q => q.eq("orgId", orgId)).collect()).filter(s => s.status !== "inactive");
-    if (direct.length > 0) return direct;
-    const orgSetting = await ctx.db.query("orgSettings").filter(q => q.eq((q.field as any)("orgId"), orgId)).first();
-    if (orgSetting) {
-      const byOrgSetting = await ctx.db.query("staff").withIndex("by_org", q => q.eq("orgId", orgSetting._id as any)).collect();
-      if (byOrgSetting.length > 0) return byOrgSetting;
-    }
-    const all = await ctx.db.query("staff").collect();
-    return all.filter(s => s.orgId === orgId || s.orgId === orgSetting?._id);
+    const direct = await ctx.db
+      .query("staff")
+      .withIndex("by_org", (q) => q.eq("orgId", orgId))
+      .collect();
+    return direct.filter((s) => s.status !== "inactive");
   },
 });
 
@@ -29,14 +25,18 @@ export const getByClerkId = query({
 
     const direct = await ctx.db
       .query("staff")
-      .filter((q) => q.eq(q.field("clerkUserId"), clerkUserId))
+      .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", clerkUserId))
       .first();
     if (direct) return direct;
 
     const email = (identity.email ?? (identity as any).emailAddress ?? "").toLowerCase().trim();
     if (!email) return null;
-    const allStaff = await ctx.db.query("staff").collect();
-    return allStaff.find(s => !s.clerkUserId && s.email?.toLowerCase().trim() === email) ?? null;
+    const emailMatch = await ctx.db
+      .query("staff")
+      .withIndex("by_email", (q) => q.eq("email", email))
+      .first();
+    if (emailMatch && !emailMatch.clerkUserId) return emailMatch;
+    return null;
   },
 });
 
@@ -48,14 +48,17 @@ export const autoLinkByEmail = mutation({
     const verified = (identity.email ?? "").toLowerCase().trim();
     if (!verified || verified !== email.toLowerCase().trim()) return null;
 
-    const direct = await ctx.db.query("staff")
-      .filter((q) => q.eq(q.field("clerkUserId"), clerkUserId)).first();
+    const direct = await ctx.db
+      .query("staff")
+      .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", clerkUserId))
+      .first();
     if (direct) return direct;
 
-    const all = await ctx.db.query("staff").collect();
-    const match = all.find((s) => !s.clerkUserId &&
-      s.email?.toLowerCase().trim() === verified);
-    if (!match) return null;
+    const match = await ctx.db
+      .query("staff")
+      .withIndex("by_email", (q) => q.eq("email", verified))
+      .first();
+    if (!match || match.clerkUserId) return null;
     await ctx.db.patch(match._id, { clerkUserId });
     return { ...match, clerkUserId };
   },
@@ -75,7 +78,11 @@ export const createWithRole = internalMutation({
     status: v.optional(v.union(v.literal("active"), v.literal("inactive"))),
   },
   handler: async (ctx, args) => {
-    return await ctx.db.insert("staff", { availability: "available", ...args });
+    return await ctx.db.insert("staff", {
+      ...args,
+      email: args.email?.toLowerCase().trim(),
+      availability: "available",
+    });
   },
 });
 
@@ -92,7 +99,7 @@ export const add = mutation({
       name: args.name.trim(),
       phone: args.phone.trim(),
       department: args.department?.trim(),
-      email: args.email?.trim(),
+      email: args.email?.toLowerCase().trim(),
       orgId,
       role: "employee",
       status: "active",
@@ -118,7 +125,7 @@ export const update = mutation({
       name: name.trim(),
       phone: phone.trim(),
       department: department?.trim(),
-      email: email?.trim(),
+      email: email?.toLowerCase().trim(),
     });
   },
 });
@@ -151,7 +158,9 @@ export const updateRole = mutation({
     assertSameOrg(orgId, record.orgId);
     if (record.clerkUserId === identity.subject)
       throw new Error("You can't change your own role");
-    await ctx.db.patch(staffId, { role });
+    await ctx.db.patch(staffId, {
+      role,
+    });
   },
 });
 
@@ -160,9 +169,11 @@ export const assertCanManageEmail = internalQuery({
   handler: async (ctx, { email }) => {
     const { orgId } = await requireAdmin(ctx);
     const target = email.toLowerCase().trim();
-    const inOrg = await ctx.db.query("staff")
-      .withIndex("by_org", (q) => q.eq("orgId", orgId)).collect();
-    if (!inOrg.some((s) => s.email?.toLowerCase().trim() === target))
+    const staff = await ctx.db
+      .query("staff")
+      .withIndex("by_email", (q) => q.eq("email", target))
+      .first();
+    if (!staff || staff.orgId !== orgId)
       throw new Error("Not authorized for this staff member");
     return true;
   },
@@ -222,7 +233,7 @@ export const getMe = query({
     if (!identity) return null;
     return await ctx.db
       .query("staff")
-      .filter((q) => q.eq(q.field("clerkUserId"), identity.subject))
+      .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", identity.subject))
       .first();
   },
 });

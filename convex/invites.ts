@@ -11,9 +11,12 @@ export const list = query({
   args: {},
   handler: async (ctx) => {
     const orgId = await resolveOrgId(ctx);
-    const all = await ctx.db.query("invites").order("desc").collect();
     if (!orgId) return [];
-    return all.filter((i: any) => i.orgId === orgId);
+    return await ctx.db
+      .query("invites")
+      .withIndex("by_org", (q) => q.eq("orgId", orgId))
+      .order("desc")
+      .collect();
   },
 });
 
@@ -33,7 +36,8 @@ export const create = internalMutation({
     email: v.string(),
     role: v.union(
       v.literal("admin"), v.literal("receptionist"),
-      v.literal("employee"), v.literal("dept_head"), v.literal("pa")
+      v.literal("employee"), v.literal("dept_head"), v.literal("pa"),
+      v.literal("superadmin")
     ),
     department: v.optional(v.string()),
     invitedByClerkId: v.string(),
@@ -45,6 +49,7 @@ export const create = internalMutation({
     const token = Math.random().toString(36).slice(2) + Date.now().toString(36);
     return await ctx.db.insert("invites", {
       ...args,
+      email: args.email.toLowerCase().trim(),
       token,
       status: "pending",
       expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
@@ -98,6 +103,7 @@ export const sendInvite = action({
     const clerkSecretKey = process.env.CLERK_SECRET_KEY;
     if (!clerkSecretKey) throw new Error("Missing CLERK_SECRET_KEY");
 
+    const normalizedEmail = args.email.toLowerCase().trim();
     const isAdminRole = (args.role as string) === "admin";
     const redirectUrl = isAdminRole
       ? (process.env.ADMIN_APP_URL ?? "http://localhost:5176") + "/sign-up"
@@ -110,7 +116,7 @@ export const sendInvite = action({
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        email_address: args.email,
+        email_address: normalizedEmail,
         public_metadata: {
           role: args.role,
           department: args.department ?? null,
@@ -136,7 +142,7 @@ export const sendInvite = action({
     // first log in via linkClerkUserInternal mutation
     await ctx.runMutation(internal.staff.createWithRole, {
       name: args.name,
-      email: args.email,
+      email: normalizedEmail,
       department: args.department,
       role: args.role,
       status: "active",
@@ -146,7 +152,7 @@ export const sendInvite = action({
     // Record invite
     const inviteId: string = await ctx.runMutation(internal.invites.create, {
       name: args.name,
-      email: args.email,
+      email: normalizedEmail,
       role: args.role,
       department: args.department,
       invitedByClerkId: args.invitedByClerkId,
@@ -162,8 +168,10 @@ export const sendInvite = action({
 export const markAccepted = internalMutation({
   args: { email: v.string() },
   handler: async (ctx, { email }) => {
-    const invite = await ctx.db.query("invites")
-      .filter(q => q.eq(q.field("email"), email))
+    const normalized = email.toLowerCase().trim();
+    const invite = await ctx.db
+      .query("invites")
+      .withIndex("by_email", (q) => q.eq("email", normalized))
       .first();
     if (invite && invite.status !== "accepted") {
       await ctx.db.patch(invite._id, { status: "accepted", acceptedAt: Date.now() });
@@ -174,8 +182,10 @@ export const markAccepted = internalMutation({
 export const linkClerkUserInternal = internalMutation({
   args: { clerkUserId: v.string(), email: v.string() },
   handler: async (ctx, { clerkUserId, email }) => {
-    const allStaff = await ctx.db.query("staff").collect();
-    const staffMember = allStaff.find(s => s.email?.toLowerCase().trim() === email.toLowerCase().trim());
+    const staffMember = await ctx.db
+      .query("staff")
+      .withIndex("by_email", (q) => q.eq("email", email.toLowerCase().trim()))
+      .first();
     if (!staffMember || staffMember.clerkUserId) return;
     await ctx.db.patch(staffMember._id, { clerkUserId });
   },
