@@ -1,6 +1,8 @@
 import { resolveOrgId } from "./getOrgId";
-﻿import { query, mutation } from "./_generated/server";
+import { query, mutation } from "./_generated/server";
 import { v } from "convex/values";
+import { requireAdmin } from "./authHelpers";
+
 const DEFAULTS = {
   approvalRequired:  true,
   maxVisitorsPerDay: 50,
@@ -18,6 +20,7 @@ const DEFAULTS = {
   minDuration:       30,
   maxDuration:       120,
 };
+
 export const get = query({
   args: {},
   handler: async (ctx) => {
@@ -28,6 +31,7 @@ export const get = query({
     return rule ?? DEFAULTS;
   },
 });
+
 export const save = mutation({
   args: {
     approvalRequired:    v.boolean(),
@@ -47,13 +51,13 @@ export const save = mutation({
     maxDuration:         v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const orgId = await resolveOrgId(ctx);
-    const existing = orgId ? (await ctx.db.query("bookingRules").collect()).find((r: any) => r.orgId === orgId) : await ctx.db.query("bookingRules").first();
+    const { orgId } = await requireAdmin(ctx);
+    const all = await ctx.db.query("bookingRules").collect();
+    const existing = all.find((r: any) => r.orgId === orgId);
     if (existing) {
       await ctx.db.patch(existing._id, { ...args, updatedAt: Date.now() });
     } else {
-      await ctx.db.insert("bookingRules", { ...args, orgId: orgId ?? undefined, updatedAt: Date.now() });
+      await ctx.db.insert("bookingRules", { ...args, orgId, updatedAt: Date.now() });
     }
   },
 });
-

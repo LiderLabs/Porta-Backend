@@ -1,8 +1,8 @@
 import { resolveOrgId } from "./getOrgId";
 import { query, mutation, action, internalMutation } from "./_generated/server";
 import { v } from "convex/values";
-import { api, internal } from "./_generated/api";
-import { requireAdmin } from "./authHelpers";
+import { internal } from "./_generated/api";
+import { requireAdmin, assertSameOrg } from "./authHelpers";
 
 const STAFF_ROLES = ["receptionist", "employee", "dept_head", "pa"] as const;
 const ADMIN_ROLES = ["admin"] as const;
@@ -27,7 +27,7 @@ export const getByToken = query({
   },
 });
 
-export const create = mutation({
+export const create = internalMutation({
   args: {
     name: v.string(),
     email: v.string(),
@@ -56,6 +56,11 @@ export const create = mutation({
 export const revoke = mutation({
   args: { inviteId: v.id("invites") },
   handler: async (ctx, { inviteId }) => {
+    const { orgId } = await requireAdmin(ctx);
+    const invite = await ctx.db.get(inviteId);
+    if (!invite) throw new Error("Invite not found");
+    assertSameOrg(orgId, invite.orgId);
+
     await ctx.db.patch(inviteId, { status: "revoked" });
   },
 });
@@ -127,8 +132,8 @@ export const sendInvite = action({
       throw new Error(msg);
     }
 
-    // Create the staff record now � clerkUserId will be linked when they
-    // first log in via linkClerkUser mutation below
+    // Create the staff record now – clerkUserId will be linked when they
+    // first log in via linkClerkUserInternal mutation
     await ctx.runMutation(internal.staff.createWithRole, {
       name: args.name,
       email: args.email,
@@ -139,7 +144,7 @@ export const sendInvite = action({
     });
 
     // Record invite
-    const inviteId: string = await ctx.runMutation(api.invites.create, {
+    const inviteId: string = await ctx.runMutation(internal.invites.create, {
       name: args.name,
       email: args.email,
       role: args.role,
@@ -151,24 +156,6 @@ export const sendInvite = action({
     });
 
     return { success: true, inviteId };
-  },
-});
-
-export const linkClerkUser = mutation({
-  args: {
-    clerkUserId: v.string(),
-    email: v.string(),
-  },
-  handler: async (ctx, { clerkUserId, email }) => {
-    // Find unlinked staff record matching this email
-    const staffMember = await ctx.db
-      .query("staff")
-      .filter(q => q.eq(q.field("email"), email))
-      .first();
-    if (!staffMember) return null;
-    if (staffMember.clerkUserId) return staffMember; // already linked
-    await ctx.db.patch(staffMember._id, { clerkUserId });
-    return { ...staffMember, clerkUserId };
   },
 });
 

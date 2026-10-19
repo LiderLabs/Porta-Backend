@@ -1,6 +1,7 @@
 import { resolveOrgId } from "./getOrgId";
-﻿import { query, mutation } from "./_generated/server";
+import { query, mutation } from "./_generated/server";
 import { v } from "convex/values";
+import { requireAdmin, assertSameOrg } from "./authHelpers";
 
 const BUFFER_MS = 10 * 60 * 1000; // 10 min buffer
 
@@ -72,11 +73,17 @@ export const create = mutation({
     floor:     v.optional(v.string()),
     capacity:  v.optional(v.number()),
     amenities: v.optional(v.array(v.string())),
+    // legacy argument, ignored on purpose. Remove after the porta-app update ships.
     orgId:     v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
+  handler: async (ctx, { name, floor, capacity, amenities }) => {
+    const { orgId } = await requireAdmin(ctx);
     return await ctx.db.insert("rooms", {
-      ...args,
+      name,
+      floor,
+      capacity,
+      amenities,
+      orgId,
       status: "active",
       createdAt: Date.now(),
     });
@@ -93,6 +100,10 @@ export const update = mutation({
     status:    v.union(v.literal("active"), v.literal("inactive")),
   },
   handler: async (ctx, { roomId, ...rest }) => {
+    const { orgId } = await requireAdmin(ctx);
+    const room = await ctx.db.get(roomId);
+    if (!room) throw new Error("Room not found");
+    assertSameOrg(orgId, room.orgId);
     await ctx.db.patch(roomId, rest);
   },
 });
@@ -100,9 +111,10 @@ export const update = mutation({
 export const remove = mutation({
   args: { roomId: v.id("rooms") },
   handler: async (ctx, { roomId }) => {
+    const { orgId } = await requireAdmin(ctx);
+    const room = await ctx.db.get(roomId);
+    if (!room) throw new Error("Room not found");
+    assertSameOrg(orgId, room.orgId);
     await ctx.db.delete(roomId);
   },
 });
-
-
-
