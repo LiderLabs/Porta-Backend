@@ -73,12 +73,16 @@ export const create = mutation({
     floor:     v.optional(v.string()),
     capacity:  v.optional(v.number()),
     amenities: v.optional(v.array(v.string())),
-    // orgId removed — never trust an orgId argument from the client
+    // legacy argument, ignored on purpose. Remove after the porta-app update ships.
+    orgId:     v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
+  handler: async (ctx, { name, floor, capacity, amenities }) => {
     const { orgId } = await requireAdmin(ctx);
     return await ctx.db.insert("rooms", {
-      ...args,
+      name,
+      floor,
+      capacity,
+      amenities,
       orgId,
       status: "active",
       createdAt: Date.now(),

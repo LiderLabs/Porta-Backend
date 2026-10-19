@@ -19,6 +19,10 @@ export const send = mutation({
   args: {
     visitId: v.id("scheduledVisits"),
     message: v.string(),
+    // legacy, ignored on purpose. Remove after the porta-app update ships.
+    senderClerkId: v.optional(v.string()),
+    senderName:    v.optional(v.string()),
+    senderRole:    v.optional(v.string()),
   },
   handler: async (ctx, { visitId, message }) => {
     const identity = await ctx.auth.getUserIdentity();

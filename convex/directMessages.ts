@@ -13,6 +13,10 @@ export const send = mutation({
     toClerkId: v.string(),
     toName:    v.string(),
     message:   v.string(),
+    // legacy, ignored on purpose. Remove after the porta-app update ships.
+    fromClerkId: v.optional(v.string()),
+    fromName:    v.optional(v.string()),
+    fromRole:    v.optional(v.string()),
   },
   handler: async (ctx, { toClerkId, toName, message }) => {
     const identity = await ctx.auth.getUserIdentity();

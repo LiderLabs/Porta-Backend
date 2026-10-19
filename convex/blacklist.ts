@@ -19,11 +19,17 @@ export const add = mutation({
     email:    v.optional(v.string()),
     phone:    v.optional(v.string()),
     reason:   v.string(),
+    // legacy argument, ignored on purpose. Remove after the porta-app update ships.
+    addedByClerkId: v.optional(v.string()),
+    addedByName:    v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
+  handler: async (ctx, { fullName, email, phone, reason }) => {
     const { identity, orgId } = await requireAdminOrReceptionist(ctx);
     return await ctx.db.insert("blacklist", {
-      ...args,
+      fullName,
+      email,
+      phone,
+      reason,
       orgId,
       addedByClerkId: identity.subject,
       addedByName: (identity.name as string) ?? identity.email ?? "Unknown",
@@ -45,16 +51,23 @@ export const remove = mutation({
   },
 });
 
+// Previously disabled: the original check query lacked organization scoping,
+// which meant an email blacklisted in one organization would block that person
+// across every other organization in the system.
+// Now safely re-enabled: scoped to the caller's organization via requireAdminOrReceptionist,
+// and correctly matches on either normalized email or digits-only phone.
 export const check = query({
   args: { email: v.optional(v.string()), phone: v.optional(v.string()) },
-  // TEMP: real logic disabled during rollout — re-enable once backfill is verified in prod.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  handler: async (_ctx, _args) => {
-    // Real logic (re-enable after prod backfill is confirmed):
-    // if (email) {
-    //   const hit = await ctx.db.query("blacklist").withIndex("by_email", q => q.eq("email", email)).first();
-    //   if (hit?.active) return { blocked: true, reason: hit.reason };
-    // }
-    return { blocked: false };
+  handler: async (ctx, { email, phone }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const e = email?.toLowerCase().trim();
+    const p = phone?.replace(/\D/g, "");
+    if (!e && !p) return { blocked: false };
+    const rows = await ctx.db.query("blacklist")
+      .withIndex("by_org", (q) => q.eq("orgId", orgId)).collect();
+    const hit = rows.find((r) => r.active && (
+      (e && r.email?.toLowerCase().trim() === e) ||
+      (p && r.phone?.replace(/\D/g, "") === p)));
+    return hit ? { blocked: true, reason: hit.reason } : { blocked: false };
   },
 });

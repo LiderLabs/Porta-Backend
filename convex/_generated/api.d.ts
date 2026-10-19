@@ -23,6 +23,7 @@ import type * as http from "../http.js";
 import type * as invites from "../invites.js";
 import type * as messages from "../messages.js";
 import type * as notifications from "../notifications.js";
+import type * as oneOffBackfills from "../oneOffBackfills.js";
 import type * as orgSettings from "../orgSettings.js";
 import type * as paAssignments from "../paAssignments.js";
 import type * as presence from "../presence.js";
@@ -55,6 +56,7 @@ declare const fullApi: ApiFromModules<{
   invites: typeof invites;
   messages: typeof messages;
   notifications: typeof notifications;
+  oneOffBackfills: typeof oneOffBackfills;
   orgSettings: typeof orgSettings;
   paAssignments: typeof paAssignments;
   presence: typeof presence;
