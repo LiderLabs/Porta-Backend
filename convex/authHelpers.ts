@@ -25,6 +25,13 @@ export const checkAdminOrReceptionistQuery = internalQuery({
   },
 });
 
+export const checkStaffMemberQuery = internalQuery({
+  args: {},
+  handler: async (ctx): Promise<AuthResult> => {
+    return await requireStaffMemberInternal(ctx);
+  },
+});
+
 async function requireRoleInternal(
   ctx: QueryCtx | MutationCtx,
   allowedRoles: string[]
@@ -85,6 +92,13 @@ async function requireAdminOrReceptionistInternal(ctx: QueryCtx | MutationCtx): 
   return requireRoleInternal(ctx, ["admin", "superadmin", "receptionist"]);
 }
 
+// Any logged-in staff role. Use for functions every staff member may call.
+const STAFF_ROLES = ["admin", "superadmin", "receptionist", "pa", "dept_head", "employee"];
+
+async function requireStaffMemberInternal(ctx: QueryCtx | MutationCtx): Promise<AuthResult> {
+  return requireRoleInternal(ctx, STAFF_ROLES);
+}
+
 export async function requireAdmin(ctx: QueryCtx | MutationCtx | ActionCtx): Promise<AuthResult> {
   if ("runQuery" in ctx && !("db" in ctx)) {
     return await (ctx as ActionCtx).runQuery(internal.authHelpers.checkAdminQuery);
@@ -97,6 +111,13 @@ export async function requireAdminOrReceptionist(ctx: QueryCtx | MutationCtx | A
     return await (ctx as ActionCtx).runQuery(internal.authHelpers.checkAdminOrReceptionistQuery);
   }
   return await requireAdminOrReceptionistInternal(ctx as QueryCtx | MutationCtx);
+}
+
+export async function requireStaffMember(ctx: QueryCtx | MutationCtx | ActionCtx): Promise<AuthResult> {
+  if ("runQuery" in ctx && !("db" in ctx)) {
+    return await (ctx as ActionCtx).runQuery(internal.authHelpers.checkStaffMemberQuery);
+  }
+  return await requireStaffMemberInternal(ctx as QueryCtx | MutationCtx);
 }
 
 export function assertSameOrg(

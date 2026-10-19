@@ -1,8 +1,14 @@
-import { resolveOrgId } from "./getOrgId";
 import { query, mutation } from "./_generated/server";
+import type { QueryCtx, MutationCtx } from "./_generated/server";
+import type { Doc, Id } from "./_generated/dataModel";
 import { api, internal } from "./_generated/api";
 import { v } from "convex/values";
-import { requireAdminOrReceptionist, assertSameOrg } from "./authHelpers";
+import {
+  requireAdminOrReceptionist,
+  requireStaffMember,
+  assertSameOrg,
+} from "./authHelpers";
+import type { AuthResult } from "./authHelpers";
 
 async function withHostName(ctx: any, visit: any) {
   if (!visit.hostId) return { ...visit, hostName: null };
@@ -10,17 +16,114 @@ async function withHostName(ctx: any, visit: any) {
   return { ...visit, hostName: s?.name ?? null };
 }
 
+// ── Shared guards ─────────────────────────────────────────────────────────────
+
+function isAdminRole(role: string | undefined) {
+  return role === "admin" || role === "superadmin";
+}
+
+/** Name to record in audit fields. Always comes from the logged-in identity. */
+function actingName(auth: AuthResult) {
+  return auth.staff?.name ?? (auth.identity.name as string | undefined) ?? auth.identity.email ?? "Staff";
+}
+
+/** Load a visit and make sure it belongs to the caller's org (strict: a visit with no orgId is refused). */
+async function loadVisitInOrg(ctx: MutationCtx, visitId: Id<"scheduledVisits">, orgId: string) {
+  const visit = await ctx.db.get(visitId);
+  if (!visit) throw new Error("Visit not found");
+  assertSameOrg(orgId, visit.orgId);
+  return visit;
+}
+
+/** Load a staff member and make sure they belong to the caller's org. */
+async function loadStaffInOrg(ctx: QueryCtx | MutationCtx, staffId: Id<"staff">, orgId: string) {
+  const staff = await ctx.db.get(staffId);
+  if (!staff) throw new Error("Staff member not found");
+  assertSameOrg(orgId, staff.orgId);
+  return staff;
+}
+
+/** Non-admins may only act on their own staff record. Admins may act on anyone in their org. */
+function assertOwnStaffOrAdmin(auth: AuthResult, target: Doc<"staff">) {
+  if (isAdminRole(auth.role)) return;
+  if (!auth.staff || auth.staff._id !== target._id) throw new Error("Not authorized");
+}
+
+/** Resolve the staff member a clerkUserId argument points at, applying the own-record / same-org rules. */
+async function staffForClerkId(ctx: QueryCtx | MutationCtx, auth: AuthResult, clerkUserId: string) {
+  const isSelf = clerkUserId === auth.identity.subject;
+  if (!isSelf && !isAdminRole(auth.role)) throw new Error("Not authorized");
+  const target = await ctx.db
+    .query("staff")
+    .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", clerkUserId))
+    .first();
+  if (!target) return null;
+  // The caller's own record is already what their org comes from. Anyone else must be in the caller's org.
+  if (!isSelf) assertSameOrg(auth.orgId, target.orgId);
+  return target;
+}
+
+/** Add hostName to visits by reading only the hosts those visits point at. */
+async function attachHostNames<T extends { hostId?: Id<"staff"> }>(ctx: QueryCtx, visits: T[]) {
+  const ids = [...new Set(visits.map((v) => v.hostId).filter((id): id is Id<"staff"> => !!id))];
+  const hosts = await Promise.all(ids.map((id) => ctx.db.get(id)));
+  const names = new Map<string, string | null>(ids.map((id, i) => [id, hosts[i]?.name ?? null]));
+  return visits.map((v) => ({ ...v, hostName: v.hostId ? (names.get(v.hostId) ?? null) : null }));
+}
+
+
+// ── Public (no login) helpers ─────────────────────────────────────────────────
+
+const MINUTE = 60 * 1000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+// Kiosk check-in window: from 2 hours before the start until 12 hours after it.
+// Fixed offsets are used instead of "end of day" so the server timezone does not matter.
+const CHECK_IN_EARLY_MS = 2 * HOUR;
+const CHECK_IN_LATE_MS = 12 * HOUR;
+
+function inCheckInWindow(now: number, scheduledDate: number) {
+  return now >= scheduledDate - CHECK_IN_EARLY_MS && now <= scheduledDate + CHECK_IN_LATE_MS;
+}
+
+/** Find an org by its public slug. Unknown or blocked orgs resolve to null. */
+async function resolvePublicOrg(ctx: QueryCtx | MutationCtx, orgSlug: string) {
+  const org = await ctx.db
+    .query("organizations")
+    .withIndex("by_slug", (q) => q.eq("slug", orgSlug))
+    .first();
+  if (!org || org.status === "blocked") return null;
+  return org;
+}
+
+/** Tell the host their visitor has arrived. */
+async function sendHostCheckInAlert(ctx: MutationCtx, visit: Doc<"scheduledVisits">, now: number) {
+  if (!visit.hostId) return;
+  const host = await ctx.db.get(visit.hostId);
+  if (!host?.email) return;
+  await ctx.scheduler.runAfter(0, internal.email.sendHostCheckInAlert, {
+    to: host.email,
+    hostName: host.name,
+    visitorName: visit.visitorName,
+    visitorCompany: visit.visitorCompany ?? undefined,
+    purpose: visit.purpose ?? undefined,
+    scheduledDate: visit.scheduledDate,
+    checkedInAt: now,
+  });
+}
+
+
 export const list = query({
   args: {},
   handler: async (ctx) => {
-    const { orgId } = await requireAdminOrReceptionist(ctx);
-    const visits = await ctx.db.query("scheduledVisits").order("desc").collect();
-    const staffList = await ctx.db.query("staff").collect();
-    const filtered = visits.filter((v: any) => v.orgId === orgId);
-    return filtered.map((v: any) => {
-      const host = v.hostId ? staffList.find((s: any) => s._id === v.hostId) : null;
-      return { ...v, hostName: host?.name ?? null };
-    });
+    const { orgId } = await requireStaffMember(ctx);
+    const visits = await ctx.db
+      .query("scheduledVisits")
+      .withIndex("by_org", (q) => q.eq("orgId", orgId))
+      .order("desc")
+      .collect();
+    return attachHostNames(ctx, visits);
   },
 });
 
@@ -28,10 +131,8 @@ export const list = query({
 export const listByStaff = query({
   args: { clerkUserId: v.string() },
   handler: async (ctx, { clerkUserId }) => {
-    const staffMember = await ctx.db
-      .query("staff")
-      .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", clerkUserId))
-      .first();
+    const auth = await requireStaffMember(ctx);
+    const staffMember = await staffForClerkId(ctx, auth, clerkUserId);
     if (!staffMember) return [];
     const visits = await ctx.db
       .query("scheduledVisits")
@@ -48,39 +149,43 @@ export const getLiveCalendar = query({
     hostId: v.optional(v.id("staff")),
   },
   handler: async (ctx, { rangeStart, rangeEnd, hostId }) => {
-    // Visits in range
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    if (hostId) await loadStaffInOrg(ctx, hostId, orgId);
+
+    // Only this org's staff. Blocked slots have no orgId of their own, so they are matched through their staff member.
+    const orgStaff = await ctx.db
+      .query("staff")
+      .withIndex("by_org", (q) => q.eq("orgId", orgId))
+      .collect();
+    const staffNames = new Map<string, string>(orgStaff.map((s) => [s._id, s.name]));
+
+    // Visits in range, this org only
     let visits = await ctx.db
       .query("scheduledVisits")
       .withIndex("by_scheduledDate", (q) =>
         q.gte("scheduledDate", rangeStart).lte("scheduledDate", rangeEnd),
       )
       .collect();
-
+    visits = visits.filter((v) => v.orgId === orgId);
     if (hostId) visits = visits.filter((v) => v.hostId === hostId);
-    const orgId = await resolveOrgId(ctx);
-    if (orgId) visits = visits.filter((v: any) => v.orgId === orgId);
 
-    // Blocked slots in range
+    // Blocked slots in range, this org's staff only
     let blocked = await ctx.db
       .query("blockedSlots")
       .withIndex("by_startTime", (q) =>
         q.gte("startTime", rangeStart).lte("startTime", rangeEnd),
       )
       .collect();
-
+    blocked = blocked.filter((b) => staffNames.has(b.staffId));
     if (hostId) blocked = blocked.filter((b) => b.staffId === hostId);
 
-    // Resolve host names for visits
-    const staffList = await ctx.db.query("staff").collect();
     const visitsWithHost = visits.map((v) => ({
       ...v,
-      hostName: v.hostId ? (staffList.find((s) => s._id === v.hostId)?.name ?? null) : null,
+      hostName: v.hostId ? (staffNames.get(v.hostId) ?? null) : null,
     }));
-
-    // Resolve staff names for blocked slots
     const blockedWithName = blocked.map((b) => ({
       ...b,
-      staffName: staffList.find((s) => s._id === b.staffId)?.name ?? null,
+      staffName: staffNames.get(b.staffId) ?? null,
     }));
 
     return { visits: visitsWithHost, blockedSlots: blockedWithName };
@@ -96,9 +201,11 @@ export const checkConflicts = query({
     excludeVisitId: v.optional(v.id("scheduledVisits")),
   },
   handler: async (ctx, { hostId, proposedStart, proposedEnd, excludeVisitId }) => {
-    const duration = 60 * 60 * 1000;
+    const { orgId } = await requireAdminOrReceptionist(ctx);
+    await loadStaffInOrg(ctx, hostId, orgId);
 
-
+    // Not filtered by visit.orgId: the host is in this org, and older visits created
+    // before orgId was set still occupy the host's time.
     const visits = await ctx.db
       .query("scheduledVisits")
       .withIndex("by_hostId", (q) => q.eq("hostId", hostId))
@@ -110,7 +217,6 @@ export const checkConflicts = query({
       const vEnd = v.scheduledDate + (v.duration ?? 60) * 60 * 1000;
       return proposedStart < vEnd && proposedEnd > v.scheduledDate;
     });
-
 
     const blocked = await ctx.db
       .query("blockedSlots")
@@ -133,10 +239,8 @@ export const checkConflicts = query({
 export const getUpcoming = query({
   args: { clerkUserId: v.string() },
   handler: async (ctx, { clerkUserId }) => {
-    const staffMember = await ctx.db
-      .query("staff")
-      .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", clerkUserId))
-      .first();
+    const auth = await requireStaffMember(ctx);
+    const staffMember = await staffForClerkId(ctx, auth, clerkUserId);
     if (!staffMember) return [];
     const now = Date.now();
     const in24h = now + 24 * 60 * 60 * 1000;
@@ -154,26 +258,6 @@ export const getUpcoming = query({
   },
 });
 
-/** Today's visits for the receptionist dashboard. */
-export const getTodayForReceptionist = query({
-  args: {},
-  handler: async (ctx) => {
-    const { orgId } = await requireAdminOrReceptionist(ctx);
-    const start = new Date(); start.setHours(0, 0, 0, 0);
-    const end = new Date(); end.setHours(23, 59, 59, 999);
-    const all = await ctx.db
-      .query("scheduledVisits")
-      .withIndex("by_scheduledDate", (q) =>
-        q.gte("scheduledDate", start.getTime()).lte("scheduledDate", end.getTime()),
-      )
-      .collect();
-    const staffList = await ctx.db.query("staff").collect();
-    return all
-      .filter((v: any) => v.orgId === orgId)
-      .map((v) => ({ ...v, hostName: staffList.find((s) => s._id === v.hostId)?.name ?? null }))
-      .sort((a, b) => a.scheduledDate - b.scheduledDate);
-  },
-});
 
 /** Get a single visit by ID (used by booking confirmation page for live status). */
 export const getById = query({
@@ -189,6 +273,8 @@ export const getById = query({
 export const getBlockedSlots = query({
   args: { staffId: v.id("staff") },
   handler: async (ctx, { staffId }) => {
+    const { orgId } = await requireStaffMember(ctx);
+    await loadStaffInOrg(ctx, staffId, orgId);
     const now = Date.now();
     const slots = await ctx.db
       .query("blockedSlots")
@@ -200,24 +286,6 @@ export const getBlockedSlots = query({
       .sort((a, b) => a.startTime - b.startTime);
   },
 });
-
-/** Public staff list for booking page. */
-export const listStaffPublic = query({
-  args: {},
-  handler: async (ctx) => {
-    const staff = await ctx.db.query("staff").collect();
-    return staff
-      .filter((s) => s.status !== "inactive")
-      .map((s) => ({
-        _id: s._id,
-        name: s.name,
-        department: s.department,
-        title: s.title,
-        availability: s.availability ?? "available",
-      }));
-  },
-});
-
 
 
 /** Create a new scheduled visit (receptionist / admin). */
@@ -259,36 +327,72 @@ export const publicBook = mutation({
     scheduledDate: v.number(),
     duration: v.optional(v.number()),
     notes: v.optional(v.string()),
-    orgSlug: v.optional(v.string()),
+    orgSlug: v.string(),
   },
   handler: async (ctx, args) => {
     const { hostStaffId, orgSlug, ...rest } = args;
+    const now = Date.now();
 
-    // Resolve host name for the email
+    // ── Validation ──
+    const org = await resolvePublicOrg(ctx, orgSlug);
+    if (!org) throw new Error("This booking page is not available.");
+
+    const visitorName = args.visitorName.trim();
+    if (!visitorName) throw new Error("Please enter your name.");
+    if (visitorName.length > 100) throw new Error("Name is too long (100 characters max).");
+    if ((args.purpose ?? "").length > 500) throw new Error("Purpose is too long (500 characters max).");
+    if ((args.notes ?? "").length > 1000) throw new Error("Notes are too long (1000 characters max).");
+    if ((args.visitorCompany ?? "").length > 200) throw new Error("Company is too long (200 characters max).");
+    if ((args.visitorPhone ?? "").length > 50) throw new Error("Phone number is too long.");
+
+    let visitorEmail: string | undefined;
+    if (args.visitorEmail && args.visitorEmail.trim()) {
+      visitorEmail = args.visitorEmail.toLowerCase().trim();
+      if (visitorEmail.length > 254 || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(visitorEmail)) {
+        throw new Error("Please enter a valid email address.");
+      }
+    }
+
+    const duration = args.duration ?? 60;
+    if (!Number.isFinite(duration) || duration < 15 || duration > 240) {
+      throw new Error("Duration must be between 15 and 240 minutes.");
+    }
+    if (!Number.isFinite(args.scheduledDate) || args.scheduledDate <= now) {
+      throw new Error("Please choose a time in the future.");
+    }
+    if (args.scheduledDate > now + 180 * DAY) {
+      throw new Error("Please choose a date within the next 180 days.");
+    }
+
+    // Host must belong to this org
     const host = hostStaffId ? await ctx.db.get(hostStaffId) : null;
+    if (hostStaffId) {
+      if (!host || host.orgId !== org._id) throw new Error("That person can't be booked here.");
+    }
 
-    // Resolve orgId from slug for booking isolation
-    let orgId: string | undefined;
-    if (orgSlug) {
-      const org = await ctx.db.query("organizations").withIndex("by_slug", q => q.eq("slug", orgSlug)).first();
-      orgId = org?._id;
-    } else {
-      const org = await ctx.db.query("organizations").first();
-      orgId = org?._id;
+    // Basic abuse limit: one email address can't flood us with bookings (and emails)
+    if (visitorEmail) {
+      const recent = await ctx.db
+        .query("scheduledVisits")
+        .withIndex("by_visitor_email", (q) =>
+          q.eq("visitorEmail", visitorEmail).gte("_creationTime", now - DAY),
+        )
+        .take(6);
+      if (recent.length > 5) throw new Error("Too many bookings from this email address. Please try again tomorrow.");
     }
 
     // Conflict check — block if host already has an approved/pending visit overlapping this slot
     if (hostStaffId) {
-      const duration = args.duration ?? 60;
       const newStart = args.scheduledDate;
-      const newEnd = newStart + duration * 60 * 1000;
-      const existing = await ctx.db.query("scheduledVisits")
-        .filter(q => q.eq(q.field("hostId"), hostStaffId))
+      const newEnd = newStart + duration * MINUTE;
+      const existing = await ctx.db
+        .query("scheduledVisits")
+        .withIndex("by_hostId", (q) => q.eq("hostId", hostStaffId))
         .collect();
-      const conflict = existing.find(v => {
+      const conflict = existing.find((v) => {
         if (!["pending", "approved", "checked_in", "in_meeting"].includes(v.status)) return false;
         const vStart = v.scheduledDate;
-        const vEnd = vStart + (v.duration ?? 60) * 60 * 1000;
+        const vEnd = vStart + (v.duration ?? 60) * MINUTE;
         return newStart < vEnd && newEnd > vStart;
       });
       if (conflict) throw new Error("That time slot is already booked for this person. Please choose a different time.");
@@ -296,17 +400,20 @@ export const publicBook = mutation({
 
     const visitId = await ctx.db.insert("scheduledVisits", {
       ...rest,
+      visitorName,
+      visitorEmail,
+      duration,
       hostId: hostStaffId,
       status: "pending",
       source: "online",
-      orgId,
+      orgId: org._id,
     });
 
     // Send "booking received" email to visitor (only if they gave an email)
-    if (args.visitorEmail) {
+    if (visitorEmail) {
       await ctx.scheduler.runAfter(0, internal.email.sendBookingReceived, {
-        to: args.visitorEmail,
-        visitorName: args.visitorName,
+        to: visitorEmail,
+        visitorName,
         hostName: host?.name ?? undefined,
         scheduledDate: args.scheduledDate,
         purpose: args.purpose ?? undefined,
@@ -319,23 +426,23 @@ export const publicBook = mutation({
   },
 });
 
-/** Receptionist or admin approves a pending visit. */
+/** Any staff member approves a pending visit in their org. */
 export const approve = mutation({
   args: {
     visitId: v.id("scheduledVisits"),
+    // legacy arguments, ignored on purpose. Remove after the porta-app update ships.
     actorClerkId: v.optional(v.string()),
     actorName: v.optional(v.string()),
   },
-  handler: async (ctx, { visitId, actorClerkId, actorName }) => {
-    const { orgId } = await requireAdminOrReceptionist(ctx);
-    const visit = await ctx.db.get(visitId);
-    if (!visit) throw new Error("Visit not found");
-    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
+  handler: async (ctx, { visitId }) => {
+    const auth = await requireStaffMember(ctx);
+    const visit = await loadVisitInOrg(ctx, visitId, auth.orgId);
+    const approvedBy = actingName(auth);
 
     await ctx.db.patch(visitId, {
       status: "approved",
       approvedAt: Date.now(),
-      approvedBy: actorName ?? actorClerkId ?? "receptionist",
+      approvedBy,
     });
 
     // Send "booking confirmed" email to visitor
@@ -349,35 +456,25 @@ export const approve = mutation({
         purpose: visit.purpose ?? undefined,
         visitorCompany: visit.visitorCompany ?? undefined,
         notes: visit.notes ?? undefined,
-        approvedBy: actorName ?? undefined,
+        approvedBy,
       });
     }
   },
 });
 
-/** Legacy accept — maps to approved for backwards compat. */
-export const accept = mutation({
-  args: { visitId: v.id("scheduledVisits") },
-  handler: async (ctx, { visitId }) => {
-    const { orgId } = await requireAdminOrReceptionist(ctx);
-    const visit = await ctx.db.get(visitId);
-    if (!visit) throw new Error("Visit not found");
-    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
-    await ctx.db.patch(visitId, { status: "approved", approvedAt: Date.now() });
-  },
-});
 
 /** Reject a visit (was pending/approved). */
 export const reject = mutation({
   args: {
     visitId: v.id("scheduledVisits"),
     reason: v.optional(v.string()),
+    // legacy arguments, ignored on purpose. Remove after the porta-app update ships.
+    actorClerkId: v.optional(v.string()),
+    actorName: v.optional(v.string()),
   },
   handler: async (ctx, { visitId, reason }) => {
-    const { orgId } = await requireAdminOrReceptionist(ctx);
-    const visit = await ctx.db.get(visitId);
-    if (!visit) throw new Error("Visit not found");
-    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
+    const { orgId } = await requireStaffMember(ctx);
+    await loadVisitInOrg(ctx, visitId, orgId);
     await ctx.db.patch(visitId, {
       status: "rejected",
       cancelReason: reason,
@@ -386,17 +483,6 @@ export const reject = mutation({
   },
 });
 
-/** Legacy decline — maps to rejected. */
-export const decline = mutation({
-  args: { visitId: v.id("scheduledVisits") },
-  handler: async (ctx, { visitId }) => {
-    const { orgId } = await requireAdminOrReceptionist(ctx);
-    const visit = await ctx.db.get(visitId);
-    if (!visit) throw new Error("Visit not found");
-    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
-    await ctx.db.patch(visitId, { status: "rejected", cancelledAt: Date.now() });
-  },
-});
 
 /** Visitor has arrived at reception — mark checked_in. */
 export const markCheckedIn = mutation({
@@ -411,51 +497,17 @@ export const markCheckedIn = mutation({
     await ctx.db.patch(visitId, { status: "checked_in", checkedInAt: now });
 
     // Send smart check-in alert to host
-    if (visit.hostId) {
-      const host = await ctx.db.get(visit.hostId);
-      if (host?.email) {
-        await ctx.scheduler.runAfter(0, internal.email.sendHostCheckInAlert, {
-          to: host.email,
-          hostName: host.name,
-          visitorName: visit.visitorName,
-          visitorCompany: visit.visitorCompany ?? undefined,
-          purpose: visit.purpose ?? undefined,
-          scheduledDate: visit.scheduledDate,
-          checkedInAt: now,
-        });
-      }
-    }
+    await sendHostCheckInAlert(ctx, visit, now);
   },
 });
 
-export const searchByVisitor = query({
-  args: { slug: v.string(), search: v.string() },
-  handler: async (ctx, { slug, search }) => {
-    if (!search || search.trim().length < 2) return [];
-    const org = await ctx.db.query("organizations").withIndex("by_slug", (q) => q.eq("slug", slug)).first();
-    if (!org) return [];
-    const term = search.toLowerCase().trim();
-    const today = new Date(); today.setHours(0, 0, 0, 0);
-    const visits = await ctx.db
-      .query("scheduledVisits")
-      .withIndex("by_org", (q) => q.eq("orgId", org._id))
-      .collect();
-    return visits.filter(v =>
-      (v.status === "approved" || v.status === "pending") &&
-      v.scheduledDate >= today.getTime() &&
-      (v.visitorName?.toLowerCase().includes(term) || v.visitorEmail?.toLowerCase().includes(term))
-    ).slice(0, 5);
-  },
-});
 
 /** Visitor is now in the meeting room. */
 export const markInMeeting = mutation({
   args: { visitId: v.id("scheduledVisits") },
   handler: async (ctx, { visitId }) => {
     const { orgId } = await requireAdminOrReceptionist(ctx);
-    const visit = await ctx.db.get(visitId);
-    if (!visit) throw new Error("Visit not found");
-    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
+    await loadVisitInOrg(ctx, visitId, orgId);
     await ctx.db.patch(visitId, { status: "in_meeting" });
   },
 });
@@ -465,9 +517,7 @@ export const markCompleted = mutation({
   args: { visitId: v.id("scheduledVisits") },
   handler: async (ctx, { visitId }) => {
     const { orgId } = await requireAdminOrReceptionist(ctx);
-    const visit = await ctx.db.get(visitId);
-    if (!visit) throw new Error("Visit not found");
-    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
+    await loadVisitInOrg(ctx, visitId, orgId);
     await ctx.db.patch(visitId, { status: "completed", completedAt: Date.now() });
   },
 });
@@ -476,10 +526,8 @@ export const markCompleted = mutation({
 export const markNoShow = mutation({
   args: { visitId: v.id("scheduledVisits") },
   handler: async (ctx, { visitId }) => {
-    const { orgId } = await requireAdminOrReceptionist(ctx);
-    const visit = await ctx.db.get(visitId);
-    if (!visit) throw new Error("Visit not found");
-    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
+    const { orgId } = await requireStaffMember(ctx);
+    await loadVisitInOrg(ctx, visitId, orgId);
     await ctx.db.patch(visitId, { status: "no_show" });
   },
 });
@@ -492,9 +540,7 @@ export const cancel = mutation({
   },
   handler: async (ctx, { visitId, reason }) => {
     const { orgId } = await requireAdminOrReceptionist(ctx);
-    const visit = await ctx.db.get(visitId);
-    if (!visit) throw new Error("Visit not found");
-    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
+    await loadVisitInOrg(ctx, visitId, orgId);
     await ctx.db.patch(visitId, {
       status: "cancelled",
       cancelledAt: Date.now(),
@@ -512,10 +558,8 @@ export const reschedule = mutation({
     notes: v.optional(v.string()),
   },
   handler: async (ctx, { visitId, scheduledDate, duration, notes }) => {
-    const { orgId } = await requireAdminOrReceptionist(ctx);
-    const existing = await ctx.db.get(visitId);
-    if (!existing) throw new Error("Visit not found");
-    if (existing.orgId) assertSameOrg(orgId, existing.orgId);
+    const { orgId } = await requireStaffMember(ctx);
+    const existing = await loadVisitInOrg(ctx, visitId, orgId);
     await ctx.db.patch(visitId, {
       scheduledDate,
       duration,
@@ -538,45 +582,48 @@ export const remove = mutation({
   },
 });
 
-/** Mark reminder sent. */
-export const markReminderSent = mutation({
-  args: { visitId: v.id("scheduledVisits") },
-  handler: async (ctx, { visitId }) => {
-    const { orgId } = await requireAdminOrReceptionist(ctx);
-    const visit = await ctx.db.get(visitId);
-    if (!visit) throw new Error("Visit not found");
-    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
-    await ctx.db.patch(visitId, { reminderSent: true });
-  },
-});
 
 /** Block a time slot for a staff member.
- *  This immediately propagates to all booking page subscribers. */
+ *  This immediately propagates to all booking page subscribers.
+ *  Non-admins can only block their own slots. */
 export const blockSlot = mutation({
   args: {
     staffId: v.id("staff"),
     startTime: v.number(),
     endTime: v.number(),
     reason: v.optional(v.string()),
-    createdByClerkId: v.string(),
+    // legacy argument, ignored on purpose. Remove after the porta-app update ships.
+    createdByClerkId: v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
+  handler: async (ctx, { staffId, startTime, endTime, reason }) => {
+    const auth = await requireStaffMember(ctx);
+    const target = await loadStaffInOrg(ctx, staffId, auth.orgId);
+    assertOwnStaffOrAdmin(auth, target);
     return await ctx.db.insert("blockedSlots", {
-      ...args,
+      staffId,
+      startTime,
+      endTime,
+      reason,
+      createdByClerkId: auth.identity.subject,
       createdAt: Date.now(),
     });
   },
 });
 
-/** Remove a blocked slot. */
+/** Remove a blocked slot. Non-admins can only remove their own. */
 export const unblockSlot = mutation({
   args: { slotId: v.id("blockedSlots") },
   handler: async (ctx, { slotId }) => {
+    const auth = await requireStaffMember(ctx);
+    const slot = await ctx.db.get(slotId);
+    if (!slot) return;
+    const target = await loadStaffInOrg(ctx, slot.staffId, auth.orgId);
+    assertOwnStaffOrAdmin(auth, target);
     await ctx.db.delete(slotId);
   },
 });
 
-/** Staff toggle their live availability status. */
+/** Set a staff member's live availability status (reception / admin). */
 export const setAvailability = mutation({
   args: {
     clerkUserId: v.string(),
@@ -588,47 +635,46 @@ export const setAvailability = mutation({
     ),
   },
   handler: async (ctx, { clerkUserId, availability }) => {
+    const { orgId } = await requireAdminOrReceptionist(ctx);
     const staffMember = await ctx.db
       .query("staff")
       .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", clerkUserId))
       .first();
     if (!staffMember) throw new Error("Staff member not found");
+    assertSameOrg(orgId, staffMember.orgId);
     await ctx.db.patch(staffMember._id, { availability });
   },
 });
 
-export const updateStatus = mutation({
-  args: {
-    visitId: v.id("scheduledVisits"),
-    status: v.union(
-      v.literal("pending"), v.literal("approved"), v.literal("accepted"),
-      v.literal("rejected"), v.literal("declined"), v.literal("checked_in"),
-      v.literal("in_meeting"), v.literal("completed"), v.literal("cancelled"),
-      v.literal("no_show"), v.literal("rescheduled"),
-    ),
-  },
-  handler: async (ctx, { visitId, status }) => {
-    const { orgId } = await requireAdminOrReceptionist(ctx);
-    const visit = await ctx.db.get(visitId);
-    if (!visit) throw new Error("Visit not found");
-    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
-    await ctx.db.patch(visitId, { status });
-  },
-});
-/** All future blocked slots across all staff â€” used by booking page. */
+/** Future blocked slots for one org's staff — used by the public booking page.
+ *  Times only: the private reason text is never returned. */
 export const listAllBlockedSlots = query({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    // Optional only while the booking page is switched over; without it nothing is returned.
+    orgSlug: v.optional(v.string()),
+  },
+  handler: async (ctx, { orgSlug }) => {
+    if (!orgSlug) return [];
+    const org = await resolvePublicOrg(ctx, orgSlug);
+    if (!org) return [];
+    const orgStaff = await ctx.db
+      .query("staff")
+      .withIndex("by_org", (q) => q.eq("orgId", org._id))
+      .collect();
     const now = Date.now();
-    const slots = await ctx.db.query("blockedSlots").collect();
-    return slots
+    const perStaff = await Promise.all(
+      orgStaff.map((s) =>
+        ctx.db.query("blockedSlots").withIndex("by_staff", (q) => q.eq("staffId", s._id)).collect(),
+      ),
+    );
+    return perStaff
+      .flat()
       .filter((s) => s.endTime >= now)
       .map((s) => ({
         _id: s._id,
         staffId: s.staffId,
         startTime: s.startTime,
         endTime: s.endTime,
-        reason: s.reason,
         date: new Date(s.startTime).toISOString().split("T")[0],
         startTimeStr: new Date(s.startTime).toTimeString().slice(0, 5),
         endTimeStr: new Date(s.endTime).toTimeString().slice(0, 5),
@@ -636,7 +682,92 @@ export const listAllBlockedSlots = query({
   },
 });
 
-/** All approved/checked-in future visits â€” used by booking page for clash detection. */
+/** Busy times for one org — used by the public booking page for clash detection.
+ *  Replaces listApprovedVisits. Returns no visitor details at all. */
+export const listBusyTimes = query({
+  args: { orgSlug: v.string() },
+  handler: async (ctx, { orgSlug }) => {
+    const org = await resolvePublicOrg(ctx, orgSlug);
+    if (!org) return [];
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const visits = await ctx.db
+      .query("scheduledVisits")
+      .withIndex("by_org", (q) => q.eq("orgId", org._id))
+      .collect();
+    return visits
+      .filter(
+        (v) =>
+          v.hostId &&
+          v.scheduledDate >= todayStart.getTime() &&
+          ["approved", "checked_in", "in_meeting", "accepted"].includes(v.status),
+      )
+      .map((v) => ({
+        hostId: v.hostId!,
+        scheduledDate: v.scheduledDate,
+        duration: v.duration ?? 60,
+      }));
+  },
+});
+
+/** Kiosk lookup: the visitor types their email and finds their own booking.
+ *  Exact email match, inside the check-in window, approved or accepted only, minimal fields. */
+export const findMyVisit = query({
+  args: { orgSlug: v.string(), email: v.string() },
+  handler: async (ctx, { orgSlug, email }) => {
+    const wanted = email.toLowerCase().trim();
+    if (!wanted || wanted.length > 254) return [];
+    const org = await resolvePublicOrg(ctx, orgSlug);
+    if (!org) return [];
+    const now = Date.now();
+    const candidates = await ctx.db
+      .query("scheduledVisits")
+      .withIndex("by_scheduledDate", (q) =>
+        q.gte("scheduledDate", now - CHECK_IN_LATE_MS).lte("scheduledDate", now + CHECK_IN_EARLY_MS),
+      )
+      .collect();
+    const matches = candidates
+      .filter(
+        (v) =>
+          v.orgId === org._id &&
+          ["approved", "accepted"].includes(v.status) &&
+          v.visitorEmail?.toLowerCase().trim() === wanted,
+      )
+      .slice(0, 5);
+    const withHosts = await attachHostNames(ctx, matches);
+    return withHosts.map((v) => ({
+      _id: v._id,
+      visitorName: v.visitorName,
+      scheduledDate: v.scheduledDate,
+      hostName: v.hostName,
+    }));
+  },
+});
+
+/** Kiosk check-in without a login. Only works for an approved/accepted visit,
+ *  inside the check-in window. Safe to call twice: the second call changes nothing and sends no email.
+ *  Once the kiosk uses this, markCheckedIn stays reception-only. */
+export const selfCheckIn = mutation({
+  args: { visitId: v.id("scheduledVisits") },
+  handler: async (ctx, { visitId }) => {
+    const visit = await ctx.db.get(visitId);
+    if (!visit) throw new Error("Visit not found");
+    if (visit.status === "checked_in") return { alreadyCheckedIn: true };
+    if (visit.status !== "approved" && visit.status !== "accepted") {
+      throw new Error("This visit can't be checked in. Please see reception.");
+    }
+    const now = Date.now();
+    if (!inCheckInWindow(now, visit.scheduledDate)) {
+      throw new Error("It isn't time to check in for this visit yet. Please see reception.");
+    }
+    await ctx.db.patch(visitId, { status: "checked_in", checkedInAt: now });
+    await sendHostCheckInAlert(ctx, visit, now);
+    return { alreadyCheckedIn: false };
+  },
+});
+
+/** DEPRECATED: returns every org's visitor details to anyone. Replaced by listBusyTimes / findMyVisit.
+ *  Delete once porta-booking (BookingPage and KioskPage) has switched. */
 export const listApprovedVisits = query({
   args: {},
   handler: async (ctx) => {
@@ -679,7 +810,9 @@ export const createByStaff = mutation({
     roomId: v.optional(v.id("rooms")),
   },
   handler: async (ctx, args) => {
+    const { orgId } = await requireStaffMember(ctx);
     const { hostStaffId, ...rest } = args;
+    if (hostStaffId) await loadStaffInOrg(ctx, hostStaffId, orgId);
     return await ctx.db.insert("scheduledVisits", {
       ...rest,
       hostId: hostStaffId,
@@ -687,10 +820,10 @@ export const createByStaff = mutation({
       approvedAt: Date.now(),
       approvedBy: "staff",
       source: "staff",
+      orgId,
     });
   },
 });
-
 
 
 export const createByPA = mutation({
@@ -707,7 +840,10 @@ export const createByPA = mutation({
     roomId: v.optional(v.id("rooms")),
   },
   handler: async (ctx, args) => {
+    const { orgId, role } = await requireStaffMember(ctx);
+    if (role !== "pa" && !isAdminRole(role)) throw new Error("Not authorized");
     const { hostStaffId, ...rest } = args;
+    if (hostStaffId) await loadStaffInOrg(ctx, hostStaffId, orgId);
     return await ctx.db.insert("scheduledVisits", {
       ...rest,
       hostId: hostStaffId,
@@ -715,23 +851,24 @@ export const createByPA = mutation({
       approvedAt: Date.now(),
       approvedBy: "pa",
       source: "admin",
+      orgId,
     });
   },
 });
 
 
-
-
+/** Visits for the caller's org. The orgId argument is ignored: the org always comes from the login. */
 export const listByOrg = query({
-  args: { orgId: v.string() },
-  handler: async (ctx, { orgId }) => {
-    const visits = await ctx.db.query("scheduledVisits").collect();
-    const staffList = await ctx.db.query("staff").collect();
-    return visits
-      .filter(v => v.orgId === orgId)
-      .map((v) => {
-        const host = v.hostId ? staffList.find((s) => s._id === v.hostId) : null;
-        return { ...v, hostName: host?.name ?? null };
-      });
+  args: {
+    // legacy argument, ignored on purpose. Remove after the porta-app update ships.
+    orgId: v.optional(v.string()),
+  },
+  handler: async (ctx) => {
+    const { orgId } = await requireStaffMember(ctx);
+    const visits = await ctx.db
+      .query("scheduledVisits")
+      .withIndex("by_org", (q) => q.eq("orgId", orgId))
+      .collect();
+    return attachHostNames(ctx, visits);
   },
 });
