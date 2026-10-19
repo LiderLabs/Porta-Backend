@@ -28,7 +28,6 @@ import type * as paAssignments from "../paAssignments.js";
 import type * as presence from "../presence.js";
 import type * as rooms from "../rooms.js";
 import type * as scheduling from "../scheduling.js";
-import type * as settings from "../settings.js";
 import type * as staff from "../staff.js";
 import type * as superadmin from "../superadmin.js";
 import type * as users from "../users.js";
@@ -61,7 +60,6 @@ declare const fullApi: ApiFromModules<{
   presence: typeof presence;
   rooms: typeof rooms;
   scheduling: typeof scheduling;
-  settings: typeof settings;
   staff: typeof staff;
   superadmin: typeof superadmin;
   users: typeof users;

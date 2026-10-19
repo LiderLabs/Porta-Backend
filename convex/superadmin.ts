@@ -1,4 +1,4 @@
-﻿import { query, mutation, action } from "./_generated/server";
+import { query, mutation, action } from "./_generated/server";
 import { api, internal } from "./_generated/api";
 import { v } from "convex/values";
 
@@ -172,7 +172,7 @@ export const sendAdminInvite = action({
 
     const data = await res.json() as { id: string };
 
-    await ctx.runMutation(api.invites.create, {
+    await ctx.runMutation(internal.invites.create, {
       name: args.adminName,
       email: args.adminEmail,
       role: "admin",
