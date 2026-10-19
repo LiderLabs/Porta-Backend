@@ -1,4 +1,4 @@
-import { action } from "./_generated/server";
+import { internalAction } from "./_generated/server";
 import { v } from "convex/values";
 
 // ── Shared email sender ───────────────────────────────────────────────────────
@@ -57,7 +57,7 @@ function formatTime(ts: number) {
 }
 
 // ── Email 1: Booking received (sent immediately when visitor books) ────────────
-export const sendBookingReceived = action({
+export const sendBookingReceived = internalAction({
   args: {
     to:             v.string(),   // visitor email
     visitorName:    v.string(),
@@ -141,7 +141,7 @@ export const sendBookingReceived = action({
 });
 
 // ── Email 2: Booking confirmed (sent when receptionist approves) ───────────────
-export const sendBookingConfirmed = action({
+export const sendBookingConfirmed = internalAction({
   args: {
     to:             v.string(),
     visitorName:    v.string(),
@@ -273,7 +273,7 @@ function outlookCalendarLink(title: string, start: number, end: number, desc: st
 }
 
 // ── Email 3: Host check-in notification ───────────────────────────────────────
-export const sendHostCheckInAlert = action({
+export const sendHostCheckInAlert = internalAction({
   args: {
     to:             v.string(),
     hostName:       v.string(),

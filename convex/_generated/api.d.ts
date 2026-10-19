@@ -25,7 +25,6 @@ import type * as messages from "../messages.js";
 import type * as notifications from "../notifications.js";
 import type * as orgSettings from "../orgSettings.js";
 import type * as paAssignments from "../paAssignments.js";
-import type * as presence from "../presence.js";
 import type * as rooms from "../rooms.js";
 import type * as scheduling from "../scheduling.js";
 import type * as staff from "../staff.js";
@@ -57,7 +56,6 @@ declare const fullApi: ApiFromModules<{
   notifications: typeof notifications;
   orgSettings: typeof orgSettings;
   paAssignments: typeof paAssignments;
-  presence: typeof presence;
   rooms: typeof rooms;
   scheduling: typeof scheduling;
   staff: typeof staff;

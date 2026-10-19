@@ -1,6 +1,7 @@
 import { query, mutation } from "./_generated/server";
 import { v } from "convex/values";
 import { resolveOrgId } from "./getOrgId";
+import { requireAdmin } from "./authHelpers";
 
 export const get = query({
   args: {},
@@ -14,6 +15,11 @@ export const get = query({
   },
 });
 
+/**
+ * Save check-in form configuration.
+ * Caller must be admin. Uses the orgId resolved by requireAdmin
+ * instead of a separate resolveOrgId call.
+ */
 export const save = mutation({
   args: {
     fields: v.array(
@@ -30,8 +36,7 @@ export const save = mutation({
     updatedAt: v.number(),
   },
   handler: async (ctx, args) => {
-    const orgId = await resolveOrgId(ctx);
-    if (!orgId) throw new Error("No orgId found");
+    const { orgId } = await requireAdmin(ctx);
 
     const existing = await ctx.db
       .query("checkInSettings")
@@ -52,4 +57,3 @@ export const save = mutation({
     }
   },
 });
-
