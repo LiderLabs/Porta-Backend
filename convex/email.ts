@@ -294,6 +294,8 @@ export const sendHostCheckInAlert = internalAction({
     purpose: v.optional(v.string()),
     scheduledDate: v.number(),
     checkedInAt: v.number(),
+    // true for a walk-in with no appointment: changes the wording below.
+    walkIn: v.optional(v.boolean()),
   },
   handler: async (_ctx, args) => {
     const apptTime = formatTime(args.scheduledDate);
@@ -302,7 +304,10 @@ export const sendHostCheckInAlert = internalAction({
 
     let timingMsg: string;
     let timingColor: string;
-    if (diffMins <= 0) {
+    if (args.walkIn) {
+      timingMsg = "just arrived at reception without an appointment.";
+      timingColor = "#1a7f37";
+    } else if (diffMins <= 0) {
       const early = Math.abs(diffMins);
       timingMsg = early <= 2
         ? `right on time for your <strong>${apptTime}</strong> appointment.`
@@ -350,7 +355,7 @@ export const sendHostCheckInAlert = internalAction({
               <tr><td style="padding:20px 24px;">
                 <div style="font-size:11px;font-weight:700;color:#9ba3ac;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:14px;">Visit Details</div>
                 ${row("👤 Visitor", visitorLabel)}
-                ${row("🕐 Appointment", apptTime)}
+                ${args.walkIn ? "" : row("🕐 Appointment", apptTime)}
                 ${row("✅ Arrived at", checkinTime)}
                 ${args.purpose ? row("📋 Purpose", args.purpose) : ""}
               </td></tr>
@@ -373,7 +378,9 @@ export const sendHostCheckInAlert = internalAction({
 
     await sendEmail({
       to: args.to,
-      subject: `🔔 ${args.visitorName} is here for your ${apptTime} appointment`,
+      subject: args.walkIn
+        ? `🔔 ${args.visitorName} has arrived at reception`
+        : `🔔 ${args.visitorName} is here for your ${apptTime} appointment`,
       html,
     });
 

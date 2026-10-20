@@ -1,5 +1,6 @@
 import { query, mutation } from "./_generated/server";
 import { v } from "convex/values";
+import { internal } from "./_generated/api";
 import { resolveOrgId } from "./getOrgId";
 import { requireAdminOrReceptionist, assertSameOrg } from "./authHelpers";
 
@@ -114,12 +115,37 @@ export const checkIn = mutation({
   },
   handler: async (ctx, args) => {
     const { orgId } = await requireAdminOrReceptionist(ctx);
-    return await ctx.db.insert("visitors", {
+
+    // The host must belong to the receptionist's organisation.
+    const host = args.hostId ? await ctx.db.get(args.hostId) : null;
+    if (args.hostId) {
+      if (!host) throw new Error("Host not found");
+      assertSameOrg(orgId, host.orgId);
+    }
+
+    const checkInTime = Date.now();
+    const visitorId = await ctx.db.insert("visitors", {
       ...args,
       orgId,
-      checkInTime: Date.now(),
+      checkInTime,
       status: "IN",
     });
+
+    // Tell the host their walk-in visitor has arrived.
+    if (host?.email) {
+      await ctx.scheduler.runAfter(0, internal.email.sendHostCheckInAlert, {
+        to: host.email,
+        hostName: host.name,
+        visitorName: args.fullName,
+        visitorCompany: args.company ?? undefined,
+        purpose: args.purpose ?? undefined,
+        scheduledDate: checkInTime,
+        checkedInAt: checkInTime,
+        walkIn: true,
+      });
+    }
+
+    return visitorId;
   },
 });
 
