@@ -346,39 +346,41 @@ export const publicBook = mutation({
 
     // ── Validation ──
     const org = await resolvePublicOrg(ctx, orgSlug);
-    if (!org) throw new Error("This booking page is not available.");
+    if (!org) throw new ConvexError("This booking page is not available.");
 
     const visitorName = args.visitorName.trim();
-    if (!visitorName) throw new Error("Please enter your name.");
-    if (visitorName.length > 100) throw new Error("Name is too long (100 characters max).");
-    if ((args.purpose ?? "").length > 500) throw new Error("Purpose is too long (500 characters max).");
-    if ((args.notes ?? "").length > 1000) throw new Error("Notes are too long (1000 characters max).");
-    if ((args.visitorCompany ?? "").length > 200) throw new Error("Company is too long (200 characters max).");
-    if ((args.visitorPhone ?? "").length > 50) throw new Error("Phone number is too long.");
+    if (!visitorName) throw new ConvexError("Please enter your name.");
+    if (visitorName.length > 100) throw new ConvexError("Name is too long (100 characters max).");
+    if ((args.purpose ?? "").length > 500) throw new ConvexError("Purpose is too long (500 characters max).");
+    if ((args.notes ?? "").length > 1000) throw new ConvexError("Notes are too long (1000 characters max).");
+    if ((args.visitorCompany ?? "").length > 200) throw new ConvexError("Company is too long (200 characters max).");
+    if ((args.visitorPhone ?? "").length > 50) throw new ConvexError("Phone number is too long.");
 
     let visitorEmail: string | undefined;
     if (args.visitorEmail && args.visitorEmail.trim()) {
       visitorEmail = args.visitorEmail.toLowerCase().trim();
       if (visitorEmail.length > 254 || !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(visitorEmail)) {
-        throw new Error("Please enter a valid email address.");
+        throw new ConvexError("Please enter a valid email address.");
       }
     }
 
     const duration = args.duration ?? 60;
     if (!Number.isFinite(duration) || duration < 15 || duration > 240) {
-      throw new Error("Duration must be between 15 and 240 minutes.");
+      throw new ConvexError("Duration must be between 15 and 240 minutes.");
     }
-    if (!Number.isFinite(args.scheduledDate) || args.scheduledDate <= now) {
-      throw new Error("Please choose a time in the future.");
+    // Small grace window: a walk-in typed on a slow kiosk can land a minute or two "late"
+    const GRACE_MS = 2 * MINUTE;
+    if (!Number.isFinite(args.scheduledDate) || args.scheduledDate < now - GRACE_MS) {
+      throw new ConvexError("That time has already passed. Please choose a later time.");
     }
     if (args.scheduledDate > now + 180 * DAY) {
-      throw new Error("Please choose a date within the next 180 days.");
+      throw new ConvexError("Please choose a date within the next 180 days.");
     }
 
     // Host must belong to this org
     const host = hostStaffId ? await ctx.db.get(hostStaffId) : null;
     if (hostStaffId) {
-      if (!host || host.orgId !== org._id) throw new Error("That person can't be booked here.");
+      if (!host || host.orgId !== org._id) throw new ConvexError("That person can't be booked here.");
     }
 
     // Basic abuse limit: one email address can't flood us with bookings (and emails)
@@ -389,7 +391,7 @@ export const publicBook = mutation({
           q.eq("visitorEmail", visitorEmail).gte("_creationTime", now - DAY),
         )
         .take(6);
-      if (recent.length > 5) throw new Error("Too many bookings from this email address. Please try again tomorrow.");
+      if (recent.length > 5) throw new ConvexError("Too many bookings from this email address. Please try again tomorrow.");
     }
 
     // Conflict check — block if host already has an approved/pending visit overlapping this slot
@@ -406,7 +408,7 @@ export const publicBook = mutation({
         const vEnd = vStart + (v.duration ?? 60) * MINUTE;
         return newStart < vEnd && newEnd > vStart;
       });
-      if (conflict) throw new Error("That time slot is already booked for this person. Please choose a different time.");
+      if (conflict) throw new ConvexError("That time slot is already booked for this person. Please choose a different time.");
     }
 
     const visitId = await ctx.db.insert("scheduledVisits", {
