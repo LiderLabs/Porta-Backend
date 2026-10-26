@@ -1,5 +1,6 @@
 import { resolveOrgId } from "./getOrgId";
 import { query, mutation, action, internalMutation } from "./_generated/server";
+import type { MutationCtx } from "./_generated/server";
 import { v, ConvexError } from "convex/values";
 import { internal } from "./_generated/api";
 import { requireAdmin, assertSameOrg } from "./authHelpers";
@@ -179,13 +180,36 @@ export const markAccepted = internalMutation({
   args: { email: v.string() },
   handler: async (ctx, { email }) => {
     const normalized = email.toLowerCase().trim();
-    const invite = await ctx.db
-      .query("invites")
-      .withIndex("by_email", (q) => q.eq("email", normalized))
-      .first();
-    if (invite && invite.status !== "accepted") {
-      await ctx.db.patch(invite._id, { status: "accepted", acceptedAt: Date.now() });
+    await acceptPendingInvites(ctx, normalized);
+  },
+});
+
+// Closes every pending invite for an email. The old code only looked at the first invite found,
+// so a person invited twice kept a pending invite forever.
+async function acceptPendingInvites(ctx: MutationCtx, email: string) {
+  const rows = await ctx.db.query("invites").withIndex("by_email", (q) => q.eq("email", email)).collect();
+  for (const r of rows) {
+    if (r.status === "pending") await ctx.db.patch(r._id, { status: "accepted", acceptedAt: Date.now() });
+  }
+}
+
+// One-off cleanup for invites left pending for people who already signed up. After deploying, run
+// invites:reconcileAcceptedInvites from the Convex dashboard (Functions, Run function).
+export const reconcileAcceptedInvites = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const pending = await ctx.db.query("invites").withIndex("by_status", (q) => q.eq("status", "pending")).collect();
+    let closed = 0;
+    for (const inv of pending) {
+      const signedUp = await ctx.db.query("users").withIndex("by_email", (q) => q.eq("email", inv.email)).first();
+      if (!signedUp) continue;
+      await ctx.db.patch(inv._id, { status: "accepted", acceptedAt: Date.now() });
+      const rows = await ctx.db.query("staff").withIndex("by_email", (q) => q.eq("email", inv.email)).collect();
+      const waiting = rows.find((s) => !s.clerkUserId);
+      if (waiting) await ctx.db.patch(waiting._id, { clerkUserId: signedUp.clerkUserId });
+      closed++;
     }
+    return { closed };
   },
 });
 
@@ -196,16 +220,18 @@ export const linkMe = mutation({
   handler: async (ctx) => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) return { linked: false };
+    // Signing in proves the invite was accepted, so close any invite still marked pending.
+    // The dashboard counted these as "pending invites" for people who were already logged in.
+    const verified = !!identity.email && identity.emailVerified === true;
+    const email = verified ? identity.email!.toLowerCase().trim() : "";
+    if (email) await acceptPendingInvites(ctx, email);
     const already = await ctx.db.query("staff").withIndex("by_clerk_id", (q) => q.eq("clerkUserId", identity.subject)).first();
     if (already) return { linked: true };
-    if (!identity.email || identity.emailVerified !== true) return { linked: false };
-    const email = identity.email.toLowerCase().trim();
+    if (!email) return { linked: false };
     const candidates = await ctx.db.query("staff").withIndex("by_email", (q) => q.eq("email", email)).collect();
     const target = candidates.find((s) => !s.clerkUserId && s.status !== "inactive");
     if (!target) return { linked: false };
     await ctx.db.patch(target._id, { clerkUserId: identity.subject });
-    const invite = await ctx.db.query("invites").withIndex("by_email", (q) => q.eq("email", email)).first();
-    if (invite && invite.status === "pending") await ctx.db.patch(invite._id, { status: "accepted", acceptedAt: Date.now() });
     return { linked: true };
   },
 });
