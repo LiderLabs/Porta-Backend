@@ -110,9 +110,10 @@ export const getPublicConfig = query({
       : await ctx.db.query("organizations").first();
     if (!org) return null;
 
-    const settings = await ctx.db.query("orgSettings").first();
-    const rules    = await ctx.db.query("bookingRules").first();
-    const staff    = await ctx.db.query("staff").collect();
+    // org-scoped (public config): never mix in another organisation's data
+    const settings = await ctx.db.query("orgSettings").withIndex("by_org", q => q.eq("orgId", org._id)).first();
+    const rules    = await ctx.db.query("bookingRules").filter(q => q.eq(q.field("orgId"), org._id)).first();
+    const staff    = await ctx.db.query("staff").withIndex("by_org", q => q.eq("orgId", org._id)).collect();
 
     return {
       org: {
