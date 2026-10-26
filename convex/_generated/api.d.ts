@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as activity from "../activity.js";
 import type * as analytics from "../analytics.js";
 import type * as authHelpers from "../authHelpers.js";
 import type * as blacklist from "../blacklist.js";
@@ -40,6 +41,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  activity: typeof activity;
   analytics: typeof analytics;
   authHelpers: typeof authHelpers;
   blacklist: typeof blacklist;

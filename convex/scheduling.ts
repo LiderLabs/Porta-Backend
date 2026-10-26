@@ -2,7 +2,7 @@ import { query, mutation } from "./_generated/server";
 import type { QueryCtx, MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { api, internal } from "./_generated/api";
-import { v } from "convex/values";
+import { v, ConvexError } from "convex/values";
 import {
   requireAdminOrReceptionist,
   requireStaffMember,
@@ -25,6 +25,17 @@ function isAdminRole(role: string | undefined) {
 /** Name to record in audit fields. Always comes from the logged-in identity. */
 function actingName(auth: AuthResult) {
   return auth.staff?.name ?? (auth.identity.name as string | undefined) ?? auth.identity.email ?? "Staff";
+}
+
+/** Record a booking action in the org's activity log (shown to admins). */
+async function logActivity(
+  ctx: MutationCtx, auth: AuthResult, visit: Doc<"scheduledVisits">, action: string,
+  extra?: { detail?: string; fromDate?: number; toDate?: number },
+) {
+  await ctx.db.insert("activityLog", {
+    orgId: auth.orgId, visitId: visit._id, action, actorName: actingName(auth),
+    targetLabel: visit.visitorName, createdAt: Date.now(), ...extra,
+  });
 }
 
 /** Load a visit and make sure it belongs to the caller's org (strict: a visit with no orgId is refused). */
@@ -444,6 +455,7 @@ export const approve = mutation({
       approvedAt: Date.now(),
       approvedBy,
     });
+    await logActivity(ctx, auth, visit, "APPROVED");
 
     // Send "booking confirmed" email to visitor
     if (visit.visitorEmail) {
@@ -473,13 +485,14 @@ export const reject = mutation({
     actorName: v.optional(v.string()),
   },
   handler: async (ctx, { visitId, reason }) => {
-    const { orgId } = await requireStaffMember(ctx);
-    await loadVisitInOrg(ctx, visitId, orgId);
+    const auth = await requireStaffMember(ctx);
+    const visit = await loadVisitInOrg(ctx, visitId, auth.orgId);
     await ctx.db.patch(visitId, {
       status: "rejected",
       cancelReason: reason,
       cancelledAt: Date.now(),
     });
+    await logActivity(ctx, auth, visit, "REJECTED", { detail: reason });
   },
 });
 
@@ -526,9 +539,10 @@ export const markCompleted = mutation({
 export const markNoShow = mutation({
   args: { visitId: v.id("scheduledVisits") },
   handler: async (ctx, { visitId }) => {
-    const { orgId } = await requireStaffMember(ctx);
-    await loadVisitInOrg(ctx, visitId, orgId);
+    const auth = await requireStaffMember(ctx);
+    const visit = await loadVisitInOrg(ctx, visitId, auth.orgId);
     await ctx.db.patch(visitId, { status: "no_show" });
+    await logActivity(ctx, auth, visit, "NO_SHOW");
   },
 });
 
@@ -539,13 +553,14 @@ export const cancel = mutation({
     reason: v.optional(v.string()),
   },
   handler: async (ctx, { visitId, reason }) => {
-    const { orgId } = await requireAdminOrReceptionist(ctx);
-    await loadVisitInOrg(ctx, visitId, orgId);
+    const auth = await requireAdminOrReceptionist(ctx);
+    const visit = await loadVisitInOrg(ctx, visitId, auth.orgId);
     await ctx.db.patch(visitId, {
       status: "cancelled",
       cancelledAt: Date.now(),
       cancelReason: reason,
     });
+    await logActivity(ctx, auth, visit, "CANCELLED", { detail: reason });
   },
 });
 
@@ -558,8 +573,8 @@ export const reschedule = mutation({
     notes: v.optional(v.string()),
   },
   handler: async (ctx, { visitId, scheduledDate, duration, notes }) => {
-    const { orgId } = await requireStaffMember(ctx);
-    const existing = await loadVisitInOrg(ctx, visitId, orgId);
+    const auth = await requireStaffMember(ctx);
+    const existing = await loadVisitInOrg(ctx, visitId, auth.orgId);
     await ctx.db.patch(visitId, {
       scheduledDate,
       duration,
@@ -567,6 +582,46 @@ export const reschedule = mutation({
       status: "pending",
       rescheduledFrom: existing.scheduledDate,
     });
+    await logActivity(ctx, auth, existing, "RESCHEDULED", { fromDate: existing.scheduledDate, toDate: scheduledDate });
+  },
+});
+
+/** Edit the details of a booking (visitor, purpose, notes, length). Date changes go through reschedule. */
+export const update = mutation({
+  args: {
+    visitId: v.id("scheduledVisits"),
+    visitorName: v.optional(v.string()),
+    visitorPhone: v.optional(v.string()),
+    visitorEmail: v.optional(v.string()),
+    visitorCompany: v.optional(v.string()),
+    purpose: v.optional(v.string()),
+    notes: v.optional(v.string()),
+    duration: v.optional(v.number()),
+  },
+  handler: async (ctx, { visitId, ...fields }) => {
+    const auth = await requireAdminOrReceptionist(ctx);
+    const visit = await loadVisitInOrg(ctx, visitId, auth.orgId);
+    if (fields.visitorName !== undefined && !fields.visitorName.trim()) throw new ConvexError("Visitor name can't be empty");
+    if (fields.duration !== undefined && (!Number.isFinite(fields.duration) || fields.duration < 5 || fields.duration > 600)) {
+      throw new ConvexError("Duration must be between 5 and 600 minutes");
+    }
+    const LABELS: Record<string, string> = {
+      visitorName: "Name", visitorPhone: "Phone", visitorEmail: "Email", visitorCompany: "Company",
+      purpose: "Purpose", notes: "Notes", duration: "Duration",
+    };
+    const patch: Record<string, any> = {};
+    const changes: string[] = [];
+    for (const [k, raw] of Object.entries(fields)) {
+      if (raw === undefined) continue;
+      const next = typeof raw === "string" ? raw.trim() : raw;
+      const prev = (visit as any)[k];
+      if ((prev ?? "") === (next ?? "")) continue;
+      patch[k] = typeof next === "string" && next === "" ? undefined : next;
+      changes.push(`${LABELS[k]}: ${prev ?? "empty"} -> ${next === "" ? "empty" : next}`);
+    }
+    if (changes.length === 0) return;
+    await ctx.db.patch(visitId, patch);
+    await logActivity(ctx, auth, visit, "EDITED", { detail: changes.join("; ") });
   },
 });
 
@@ -574,10 +629,11 @@ export const reschedule = mutation({
 export const remove = mutation({
   args: { visitId: v.id("scheduledVisits") },
   handler: async (ctx, { visitId }) => {
-    const { orgId } = await requireAdminOrReceptionist(ctx);
+    const auth = await requireAdminOrReceptionist(ctx);
     const visit = await ctx.db.get(visitId);
     if (!visit) return;
-    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
+    if (visit.orgId) assertSameOrg(auth.orgId, visit.orgId);
+    await logActivity(ctx, auth, visit, "DELETED");
     await ctx.db.delete(visitId);
   },
 });

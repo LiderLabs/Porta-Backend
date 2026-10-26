@@ -158,6 +158,21 @@ export default defineSchema({
     updatedAt: v.number(),
   }).index("by_planId", ["planId"]),
 
+  // Per-organisation record of what staff did to bookings. Read by the admin Activity log page.
+  activityLog: defineTable({
+    orgId: v.string(),
+    visitId: v.optional(v.id("scheduledVisits")),
+    action: v.string(),
+    actorName: v.string(),
+    targetLabel: v.optional(v.string()),
+    detail: v.optional(v.string()),
+    fromDate: v.optional(v.number()),
+    toDate: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index("by_org_createdAt", ["orgId", "createdAt"])
+    .index("by_visit", ["visitId"]),
+
   auditLog: defineTable({
     action: v.string(),
     actorClerkId: v.string(),
