@@ -1,6 +1,6 @@
 import { resolveOrgId } from "./getOrgId";
 import { query, mutation, action, internalMutation } from "./_generated/server";
-import { v } from "convex/values";
+import { v, ConvexError } from "convex/values";
 import { internal } from "./_generated/api";
 import { requireAdmin, assertSameOrg } from "./authHelpers";
 
@@ -94,12 +94,21 @@ export const sendInvite = action({
       v.literal("employee"), v.literal("dept_head"), v.literal("pa")
     ),
     department: v.optional(v.string()),
-    invitedByClerkId: v.string(),
-    invitedByName: v.string(),
+    invitedByClerkId: v.optional(v.string()),
+    invitedByName: v.optional(v.string()),
+    whatsappNumber: v.optional(v.string()),
     orgId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    await requireAdmin(ctx);
+    const admin = await requireAdmin(ctx);
+    // The inviter and the organisation come from the signed-in admin, not from the request.
+    // The admin screen no longer sends the inviter, which is what made every invite fail.
+    if (args.orgId && args.orgId !== admin.orgId) {
+      throw new ConvexError("You can only invite people to your own organisation");
+    }
+    const orgId = admin.orgId;
+    const invitedByClerkId = admin.identity.subject;
+    const invitedByName = admin.staff?.name ?? admin.identity.name ?? "Admin";
     const clerkSecretKey = process.env.CLERK_SECRET_KEY;
     if (!clerkSecretKey) throw new Error("Missing CLERK_SECRET_KEY");
 
@@ -120,7 +129,7 @@ export const sendInvite = action({
         public_metadata: {
           role: args.role,
           department: args.department ?? null,
-          orgId: args.orgId ?? null,
+          orgId: orgId ?? null,
         },
         notify: true,
         redirect_url: redirectUrl,
@@ -134,8 +143,8 @@ export const sendInvite = action({
     } else {
       const err = (await res.json()) as { errors?: { message: string }[] };
       const msg = err.errors?.[0]?.message ?? "Failed to send Clerk invite";
-      if (msg.toLowerCase().includes("duplicate")) throw new Error("An invite was already sent to this email. Please revoke the existing invite first.");
-      throw new Error(msg);
+      if (msg.toLowerCase().includes("duplicate")) throw new ConvexError("An invite was already sent to this email. Please revoke the existing invite first.");
+      throw new ConvexError(msg);
     }
 
     // Create the staff record now – clerkUserId will be linked when they
@@ -146,7 +155,8 @@ export const sendInvite = action({
       department: args.department,
       role: args.role,
       status: "active",
-      orgId: args.orgId,
+      phone: args.whatsappNumber?.trim() || undefined,
+      orgId,
     });
 
     // Record invite
@@ -155,9 +165,9 @@ export const sendInvite = action({
       email: normalizedEmail,
       role: args.role,
       department: args.department,
-      invitedByClerkId: args.invitedByClerkId,
-      invitedByName: args.invitedByName,
-      orgId: args.orgId,
+      invitedByClerkId,
+      invitedByName,
+      orgId,
       clerkInviteId,
     });
 

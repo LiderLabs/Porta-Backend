@@ -1,0 +1,226 @@
+diff --git a/convex/_generated/api.d.ts b/convex/_generated/api.d.ts
+index f9f32bc..4a559a9 100644
+--- a/convex/_generated/api.d.ts
++++ b/convex/_generated/api.d.ts
+@@ -8,6 +8,7 @@
+  * @module
+  */
+ 
++import type * as activity from "../activity.js";
+ import type * as analytics from "../analytics.js";
+ import type * as authHelpers from "../authHelpers.js";
+ import type * as blacklist from "../blacklist.js";
+@@ -40,6 +41,7 @@ import type {
+ } from "convex/server";
+ 
+ declare const fullApi: ApiFromModules<{
++  activity: typeof activity;
+   analytics: typeof analytics;
+   authHelpers: typeof authHelpers;
+   blacklist: typeof blacklist;
+diff --git a/convex/activity.ts b/convex/activity.ts
+new file mode 100644
+index 0000000..ffab477
+--- /dev/null
++++ b/convex/activity.ts
+@@ -0,0 +1,16 @@
++import { query } from "./_generated/server";
++import { v } from "convex/values";
++import { requireAdmin } from "./authHelpers";
++
++/** Booking activity for the admin's own organisation, newest first. */
++export const list = query({
++  args: { limit: v.optional(v.number()) },
++  handler: async (ctx, { limit }) => {
++    const { orgId } = await requireAdmin(ctx);
++    return await ctx.db
++      .query("activityLog")
++      .withIndex("by_org_createdAt", (q) => q.eq("orgId", orgId))
++      .order("desc")
++      .take(Math.min(Math.max(limit ?? 200, 1), 500));
++  },
++});
+diff --git a/convex/scheduling.ts b/convex/scheduling.ts
+index e39e769..261f425 100644
+--- a/convex/scheduling.ts
++++ b/convex/scheduling.ts
+@@ -2,7 +2,7 @@ import { query, mutation } from "./_generated/server";
+ import type { QueryCtx, MutationCtx } from "./_generated/server";
+ import type { Doc, Id } from "./_generated/dataModel";
+ import { api, internal } from "./_generated/api";
+-import { v } from "convex/values";
++import { v, ConvexError } from "convex/values";
+ import {
+   requireAdminOrReceptionist,
+   requireStaffMember,
+@@ -27,6 +27,17 @@ function actingName(auth: AuthResult) {
+   return auth.staff?.name ?? (auth.identity.name as string | undefined) ?? auth.identity.email ?? "Staff";
+ }
+ 
++/** Record a booking action in the org's activity log (shown to admins). */
++async function logActivity(
++  ctx: MutationCtx, auth: AuthResult, visit: Doc<"scheduledVisits">, action: string,
++  extra?: { detail?: string; fromDate?: number; toDate?: number },
++) {
++  await ctx.db.insert("activityLog", {
++    orgId: auth.orgId, visitId: visit._id, action, actorName: actingName(auth),
++    targetLabel: visit.visitorName, createdAt: Date.now(), ...extra,
++  });
++}
++
+ /** Load a visit and make sure it belongs to the caller's org (strict: a visit with no orgId is refused). */
+ async function loadVisitInOrg(ctx: MutationCtx, visitId: Id<"scheduledVisits">, orgId: string) {
+   const visit = await ctx.db.get(visitId);
+@@ -444,6 +455,7 @@ export const approve = mutation({
+       approvedAt: Date.now(),
+       approvedBy,
+     });
++    await logActivity(ctx, auth, visit, "APPROVED");
+ 
+     // Send "booking confirmed" email to visitor
+     if (visit.visitorEmail) {
+@@ -473,13 +485,14 @@ export const reject = mutation({
+     actorName: v.optional(v.string()),
+   },
+   handler: async (ctx, { visitId, reason }) => {
+-    const { orgId } = await requireStaffMember(ctx);
+-    await loadVisitInOrg(ctx, visitId, orgId);
++    const auth = await requireStaffMember(ctx);
++    const visit = await loadVisitInOrg(ctx, visitId, auth.orgId);
+     await ctx.db.patch(visitId, {
+       status: "rejected",
+       cancelReason: reason,
+       cancelledAt: Date.now(),
+     });
++    await logActivity(ctx, auth, visit, "REJECTED", { detail: reason });
+   },
+ });
+ 
+@@ -526,9 +539,10 @@ export const markCompleted = mutation({
+ export const markNoShow = mutation({
+   args: { visitId: v.id("scheduledVisits") },
+   handler: async (ctx, { visitId }) => {
+-    const { orgId } = await requireStaffMember(ctx);
+-    await loadVisitInOrg(ctx, visitId, orgId);
++    const auth = await requireStaffMember(ctx);
++    const visit = await loadVisitInOrg(ctx, visitId, auth.orgId);
+     await ctx.db.patch(visitId, { status: "no_show" });
++    await logActivity(ctx, auth, visit, "NO_SHOW");
+   },
+ });
+ 
+@@ -539,13 +553,14 @@ export const cancel = mutation({
+     reason: v.optional(v.string()),
+   },
+   handler: async (ctx, { visitId, reason }) => {
+-    const { orgId } = await requireAdminOrReceptionist(ctx);
+-    await loadVisitInOrg(ctx, visitId, orgId);
++    const auth = await requireAdminOrReceptionist(ctx);
++    const visit = await loadVisitInOrg(ctx, visitId, auth.orgId);
+     await ctx.db.patch(visitId, {
+       status: "cancelled",
+       cancelledAt: Date.now(),
+       cancelReason: reason,
+     });
++    await logActivity(ctx, auth, visit, "CANCELLED", { detail: reason });
+   },
+ });
+ 
+@@ -558,8 +573,8 @@ export const reschedule = mutation({
+     notes: v.optional(v.string()),
+   },
+   handler: async (ctx, { visitId, scheduledDate, duration, notes }) => {
+-    const { orgId } = await requireStaffMember(ctx);
+-    const existing = await loadVisitInOrg(ctx, visitId, orgId);
++    const auth = await requireStaffMember(ctx);
++    const existing = await loadVisitInOrg(ctx, visitId, auth.orgId);
+     await ctx.db.patch(visitId, {
+       scheduledDate,
+       duration,
+@@ -567,6 +582,46 @@ export const reschedule = mutation({
+       status: "pending",
+       rescheduledFrom: existing.scheduledDate,
+     });
++    await logActivity(ctx, auth, existing, "RESCHEDULED", { fromDate: existing.scheduledDate, toDate: scheduledDate });
++  },
++});
++
++/** Edit the details of a booking (visitor, purpose, notes, length). Date changes go through reschedule. */
++export const update = mutation({
++  args: {
++    visitId: v.id("scheduledVisits"),
++    visitorName: v.optional(v.string()),
++    visitorPhone: v.optional(v.string()),
++    visitorEmail: v.optional(v.string()),
++    visitorCompany: v.optional(v.string()),
++    purpose: v.optional(v.string()),
++    notes: v.optional(v.string()),
++    duration: v.optional(v.number()),
++  },
++  handler: async (ctx, { visitId, ...fields }) => {
++    const auth = await requireAdminOrReceptionist(ctx);
++    const visit = await loadVisitInOrg(ctx, visitId, auth.orgId);
++    if (fields.visitorName !== undefined && !fields.visitorName.trim()) throw new ConvexError("Visitor name can't be empty");
++    if (fields.duration !== undefined && (!Number.isFinite(fields.duration) || fields.duration < 5 || fields.duration > 600)) {
++      throw new ConvexError("Duration must be between 5 and 600 minutes");
++    }
++    const LABELS: Record<string, string> = {
++      visitorName: "Name", visitorPhone: "Phone", visitorEmail: "Email", visitorCompany: "Company",
++      purpose: "Purpose", notes: "Notes", duration: "Duration",
++    };
++    const patch: Record<string, any> = {};
++    const changes: string[] = [];
++    for (const [k, raw] of Object.entries(fields)) {
++      if (raw === undefined) continue;
++      const next = typeof raw === "string" ? raw.trim() : raw;
++      const prev = (visit as any)[k];
++      if ((prev ?? "") === (next ?? "")) continue;
++      patch[k] = typeof next === "string" && next === "" ? undefined : next;
++      changes.push(`${LABELS[k]}: ${prev ?? "empty"} -> ${next === "" ? "empty" : next}`);
++    }
++    if (changes.length === 0) return;
++    await ctx.db.patch(visitId, patch);
++    await logActivity(ctx, auth, visit, "EDITED", { detail: changes.join("; ") });
+   },
+ });
+ 
+@@ -574,10 +629,11 @@ export const reschedule = mutation({
+ export const remove = mutation({
+   args: { visitId: v.id("scheduledVisits") },
+   handler: async (ctx, { visitId }) => {
+-    const { orgId } = await requireAdminOrReceptionist(ctx);
++    const auth = await requireAdminOrReceptionist(ctx);
+     const visit = await ctx.db.get(visitId);
+     if (!visit) return;
+-    if (visit.orgId) assertSameOrg(orgId, visit.orgId);
++    if (visit.orgId) assertSameOrg(auth.orgId, visit.orgId);
++    await logActivity(ctx, auth, visit, "DELETED");
+     await ctx.db.delete(visitId);
+   },
+ });
+diff --git a/convex/schema.ts b/convex/schema.ts
+index 83e404b..8a3001a 100644
+--- a/convex/schema.ts
++++ b/convex/schema.ts
+@@ -158,6 +158,21 @@ export default defineSchema({
+     updatedAt: v.number(),
+   }).index("by_planId", ["planId"]),
+ 
++  // Per-organisation record of what staff did to bookings. Read by the admin Activity log page.
++  activityLog: defineTable({
++    orgId: v.string(),
++    visitId: v.optional(v.id("scheduledVisits")),
++    action: v.string(),
++    actorName: v.string(),
++    targetLabel: v.optional(v.string()),
++    detail: v.optional(v.string()),
++    fromDate: v.optional(v.number()),
++    toDate: v.optional(v.number()),
++    createdAt: v.number(),
++  })
++    .index("by_org_createdAt", ["orgId", "createdAt"])
++    .index("by_visit", ["visitId"]),
++
+   auditLog: defineTable({
+     action: v.string(),
+     actorClerkId: v.string(),
