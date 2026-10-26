@@ -1,6 +1,6 @@
 import { QueryCtx, MutationCtx, ActionCtx, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { resolveOrgId, isOrgBlocked } from "./getOrgId";
+import { resolveOrgId, isOrgBlocked, findStaffForIdentity } from "./getOrgId";
 import type { UserIdentity } from "convex/server";
 import type { Doc } from "./_generated/dataModel";
 
@@ -41,10 +41,7 @@ async function requireRoleInternal(
     throw new Error("Not authenticated");
   }
 
-  const staff = await ctx.db
-    .query("staff")
-    .withIndex("by_clerk_id", (q) => q.eq("clerkUserId", identity.subject))
-    .first();
+  const staff = await findStaffForIdentity(ctx, identity);
 
   let role: string | undefined = staff?.role;
   let orgId: string | undefined = staff?.orgId ?? (identity.publicMetadata as any)?.orgId;
@@ -64,6 +61,7 @@ async function requireRoleInternal(
         .unique();
       if (user) {
         role = user.role;
+        if (!orgId && user.orgId) orgId = user.orgId;
       }
     }
   }

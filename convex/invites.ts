@@ -189,6 +189,27 @@ export const markAccepted = internalMutation({
   },
 });
 
+// Called by the app right after sign-in. Links the person's login to the staff record made when
+// they were invited, so they do not depend on the Clerk webhook arriving.
+export const linkMe = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) return { linked: false };
+    const already = await ctx.db.query("staff").withIndex("by_clerk_id", (q) => q.eq("clerkUserId", identity.subject)).first();
+    if (already) return { linked: true };
+    if (!identity.email || identity.emailVerified !== true) return { linked: false };
+    const email = identity.email.toLowerCase().trim();
+    const candidates = await ctx.db.query("staff").withIndex("by_email", (q) => q.eq("email", email)).collect();
+    const target = candidates.find((s) => !s.clerkUserId && s.status !== "inactive");
+    if (!target) return { linked: false };
+    await ctx.db.patch(target._id, { clerkUserId: identity.subject });
+    const invite = await ctx.db.query("invites").withIndex("by_email", (q) => q.eq("email", email)).first();
+    if (invite && invite.status === "pending") await ctx.db.patch(invite._id, { status: "accepted", acceptedAt: Date.now() });
+    return { linked: true };
+  },
+});
+
 export const linkClerkUserInternal = internalMutation({
   args: { clerkUserId: v.string(), email: v.string() },
   handler: async (ctx, { clerkUserId, email }) => {
