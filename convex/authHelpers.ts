@@ -1,6 +1,6 @@
 import { QueryCtx, MutationCtx, ActionCtx, internalQuery } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { resolveOrgId } from "./getOrgId";
+import { resolveOrgId, isOrgBlocked } from "./getOrgId";
 import type { UserIdentity } from "convex/server";
 import type { Doc } from "./_generated/dataModel";
 
@@ -79,6 +79,12 @@ async function requireRoleInternal(
 
   if (!orgId) {
     throw new Error("Organization not found");
+  }
+
+  // A blocked or suspended organisation loses access for everyone except the superadmin.
+  // Before this, blocking only hid the public booking page; logged-in staff carried on as normal.
+  if (role !== "superadmin" && (await isOrgBlocked(ctx, orgId))) {
+    throw new Error("This organisation has been blocked. Please contact support.");
   }
 
   return { identity, orgId, staff, role };

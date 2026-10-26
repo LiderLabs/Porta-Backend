@@ -3,6 +3,15 @@ import { v } from "convex/values";
 import { query, mutation, action, internalQuery, internalMutation, internalAction } from "./_generated/server";
 import { requireSuperadmin } from "./authHelpers";
 
+// Slugs go into public booking and kiosk links, so keep them lowercase and URL safe.
+function normaliseSlug(raw: string) {
+  const slug = raw.trim().toLowerCase();
+  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug)) {
+    throw new Error("Slug may only contain lowercase letters, numbers and single dashes");
+  }
+  return slug;
+}
+
 const DEFAULT_FEATURES = {
   checkInEnabled: true,
   badgesEnabled: false,
@@ -109,21 +118,26 @@ export const createOrg = mutation({
     const actor = admin.name || actorName;
 
     // Check slug not already taken
+    const slug = normaliseSlug(args.slug);
     const existing = await ctx.db
       .query("organizations")
-      .withIndex("by_slug", q => q.eq("slug", args.slug))
+      .withIndex("by_slug", q => q.eq("slug", slug))
       .first();
-    if (existing) throw new Error(`Slug "${args.slug}" is already taken`);
+    if (existing) throw new Error(`Slug "${slug}" is already taken`);
+    // The platform settings screen has a trial length, so use it (14 days if never saved).
+    const platform = await ctx.db.query("platformSettings").first();
+    const trialDays = platform?.trialDays ?? 14;
 
     const id = await ctx.db.insert("organizations", {
       ...args,
+      slug,
       status: "trial",
       features: DEFAULT_FEATURES as any,
       bookingRules: args.bookingRules ?? {
         idRequired: false, photoRequired: false,
         approvalRequired: true, walkInEnabled: true,
       },
-      trialEndsAt: Date.now() + 14 * 24 * 60 * 60 * 1000,
+      trialEndsAt: Date.now() + trialDays * 24 * 60 * 60 * 1000,
       createdAt: Date.now(),
     });
 
@@ -155,7 +169,9 @@ export const sendAdminInvite = action({
     await requireSuperadmin(ctx);
     const clerkSecretKey = process.env.CLERK_SECRET_KEY;
     if (!clerkSecretKey) throw new Error("Missing CLERK_SECRET_KEY");
-    const adminAppUrl = (process.env.ADMIN_APP_URL ?? "http://localhost:5176") + "/sign-up";
+    const adminBase = process.env.ADMIN_APP_URL;
+    if (!adminBase) throw new Error("Missing ADMIN_APP_URL");
+    const adminAppUrl = adminBase.replace(/\/$/, "") + "/sign-up";
 
     const res = await fetch("https://api.clerk.com/v1/invitations", {
       method: "POST",
@@ -332,6 +348,13 @@ export const updateOrg = mutation({
   },
   handler: async (ctx, { orgId, actorClerkId, actorName, ...fields }) => {
     const admin = await requireSuperadmin(ctx);
+    if (fields.slug !== undefined) {
+      // Two orgs on one slug would send visitors to the wrong organisation.
+      const slug = normaliseSlug(fields.slug);
+      const clash = await ctx.db.query("organizations").withIndex("by_slug", q => q.eq("slug", slug)).first();
+      if (clash && clash._id !== orgId) throw new Error(`Slug "${slug}" is already taken`);
+      fields.slug = slug;
+    }
     const updates: Record<string, any> = {};
     for (const [k, v] of Object.entries(fields)) {
       if (v !== undefined) updates[k] = v;
@@ -346,6 +369,9 @@ export const deleteOrg = mutation({
   handler: async (ctx, { orgId, actorClerkId, actorName }) => {
     const admin = await requireSuperadmin(ctx);
     const org = await ctx.db.get(orgId);
+    if (!org) throw new Error("Organisation not found");
+    // Staff, visits and rooms stay behind, so make the superadmin block it first and think twice.
+    if (org.status !== "blocked") throw new Error("Block the organisation before deleting it");
     await ctx.db.insert("auditLog", { action: "DELETE_ORG", actorClerkId: admin.clerkUserId || actorClerkId, actorName: admin.name || actorName, targetType: "organization", targetId: orgId, targetLabel: org?.name, detail: "Permanently deleted", createdAt: Date.now() });
     await ctx.db.delete(orgId);
   },
@@ -435,7 +461,9 @@ export const setUserMetadata = action({
     userClerkId: v.string(),
     orgId: v.id("organizations"),
     orgName: v.string(),
-    role: v.union(v.literal("admin"), v.literal("staff")),
+    // "staff" is kept for the current superadmin screen and is stored as "employee",
+    // because the app has no role called "staff" and would lock that user out.
+    role: v.union(v.literal("admin"), v.literal("employee"), v.literal("receptionist"), v.literal("pa"), v.literal("dept_head"), v.literal("staff")),
   },
   handler: async (ctx, { userClerkId, orgId, orgName, role }) => {
     await requireSuperadmin(ctx);
@@ -445,7 +473,7 @@ export const setUserMetadata = action({
         Authorization: `Bearer ${process.env.CLERK_SECRET_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ public_metadata: { role, orgId, orgName } }),
+      body: JSON.stringify({ public_metadata: { role: role === "staff" ? "employee" : role, orgId, orgName } }),
     });
     if (!res.ok) throw new Error("Failed to update metadata");
     return { success: true };
@@ -495,6 +523,9 @@ export const savePlatformSettings = mutation({
   },
   handler: async (ctx, { actorClerkId, actorName, ...settings }) => {
     const admin = await requireSuperadmin(ctx);
+    if (!Number.isInteger(settings.trialDays) || settings.trialDays < 1 || settings.trialDays > 365) throw new Error("Trial days must be between 1 and 365");
+    if (settings.annualDiscount < 0 || settings.annualDiscount > 100) throw new Error("Annual discount must be between 0 and 100");
+    if (!Number.isInteger(settings.gracePeriodDays) || settings.gracePeriodDays < 0 || settings.gracePeriodDays > 90) throw new Error("Grace period must be between 0 and 90 days");
     const existing = await ctx.db.query("platformSettings").first();
     const data = { ...settings, updatedAt: Date.now(), updatedBy: admin.name || actorName };
     if (existing) {
@@ -519,7 +550,8 @@ export const clearAuditLog = mutation({
   args: { actorClerkId: v.string(), actorName: v.string() },
   handler: async (ctx, { actorClerkId, actorName }) => {
     const admin = await requireSuperadmin(ctx);
-    const logs = await ctx.db.query("auditLog").collect();
+    // One call can only delete so many rows, so clear in batches. Run it again while "more" is true.
+    const logs = await ctx.db.query("auditLog").take(2000);
     await Promise.all(logs.map(l => ctx.db.delete(l._id)));
     await ctx.db.insert("auditLog", {
       action: "CLEAR_AUDIT_LOG",
@@ -528,9 +560,10 @@ export const clearAuditLog = mutation({
       targetType: "platform",
       targetId: "platform",
       targetLabel: "Audit Log",
-      detail: "Cleared all audit log entries",
+      detail: `Cleared ${logs.length} audit log entries`,
       createdAt: Date.now(),
     });
+    return { deleted: logs.length, more: logs.length === 2000 };
   },
 });
 
@@ -545,7 +578,8 @@ export const resetAllFeatureFlags = mutation({
       attendanceEnabled: false, multiLocationEnabled: false, apiAccessEnabled: false,
       ssoEnabled: false, whitelabelEnabled: false, dedicatedSupportEnabled: false,
     };
-    await Promise.all(orgs.map(o => ctx.db.patch(o._id, { features: defaults })));
+    // Paid plans keep their paid features. The old code gave every org the free defaults.
+    await Promise.all(orgs.map(o => ctx.db.patch(o._id, { features: { ...defaults, ...(PLAN_FEATURES[o.plan] ?? {}) } as any })));
     await ctx.db.insert("auditLog", {
       action: "RESET_FEATURE_FLAGS",
       actorClerkId: admin.clerkUserId || actorClerkId,
