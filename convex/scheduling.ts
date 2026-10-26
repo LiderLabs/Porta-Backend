@@ -339,10 +339,14 @@ export const publicBook = mutation({
     duration: v.optional(v.number()),
     notes: v.optional(v.string()),
     orgSlug: v.string(),
+    // Kiosk walk-in: this is a log book entry. Recorded at arrival time, never rejected for time or conflicts.
+    walkIn: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const { hostStaffId, orgSlug, ...rest } = args;
+    const { hostStaffId, orgSlug, walkIn, ...rest } = args;
     const now = Date.now();
+    const isWalkIn = walkIn === true;
+    const when = isWalkIn ? now : args.scheduledDate;
 
     // ── Validation ──
     const org = await resolvePublicOrg(ctx, orgSlug);
@@ -370,10 +374,10 @@ export const publicBook = mutation({
     }
     // Small grace window: a walk-in typed on a slow kiosk can land a minute or two "late"
     const GRACE_MS = 2 * MINUTE;
-    if (!Number.isFinite(args.scheduledDate) || args.scheduledDate < now - GRACE_MS) {
+    if (!isWalkIn && (!Number.isFinite(args.scheduledDate) || args.scheduledDate < now - GRACE_MS)) {
       throw new ConvexError("That time has already passed. Please choose a later time.");
     }
-    if (args.scheduledDate > now + 180 * DAY) {
+    if (!isWalkIn && args.scheduledDate > now + 180 * DAY) {
       throw new ConvexError("Please choose a date within the next 180 days.");
     }
 
@@ -395,7 +399,7 @@ export const publicBook = mutation({
     }
 
     // Conflict check — block if host already has an approved/pending visit overlapping this slot
-    if (hostStaffId) {
+    if (hostStaffId && !isWalkIn) {
       const newStart = args.scheduledDate;
       const newEnd = newStart + duration * MINUTE;
       const existing = await ctx.db
@@ -417,8 +421,9 @@ export const publicBook = mutation({
       visitorEmail,
       duration,
       hostId: hostStaffId,
+      scheduledDate: when,
       status: "pending",
-      source: "online",
+      source: isWalkIn ? "walkin" : "online",
       orgId: org._id,
     });
 
@@ -428,7 +433,7 @@ export const publicBook = mutation({
         to: visitorEmail,
         visitorName,
         hostName: host?.name ?? undefined,
-        scheduledDate: args.scheduledDate,
+        scheduledDate: when,
         purpose: args.purpose ?? undefined,
         visitorCompany: args.visitorCompany ?? undefined,
         notes: args.notes ?? undefined,
