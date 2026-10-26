@@ -1,5 +1,5 @@
 import { api, internal } from "./_generated/api";
-import { v } from "convex/values";
+import { v, ConvexError } from "convex/values";
 import { query, mutation, action, internalQuery, internalMutation, internalAction } from "./_generated/server";
 import { requireSuperadmin } from "./authHelpers";
 
@@ -7,7 +7,7 @@ import { requireSuperadmin } from "./authHelpers";
 function normaliseSlug(raw: string) {
   const slug = raw.trim().toLowerCase();
   if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug)) {
-    throw new Error("Slug may only contain lowercase letters, numbers and single dashes");
+    throw new ConvexError("Slug may only contain lowercase letters, numbers and single dashes");
   }
   return slug;
 }
@@ -123,7 +123,7 @@ export const createOrg = mutation({
       .query("organizations")
       .withIndex("by_slug", q => q.eq("slug", slug))
       .first();
-    if (existing) throw new Error(`Slug "${slug}" is already taken`);
+    if (existing) throw new ConvexError(`Slug "${slug}" is already taken`);
     // The platform settings screen has a trial length, so use it (14 days if never saved).
     const platform = await ctx.db.query("platformSettings").first();
     const trialDays = platform?.trialDays ?? 14;
@@ -170,7 +170,7 @@ export const sendAdminInvite = action({
     const clerkSecretKey = process.env.CLERK_SECRET_KEY;
     if (!clerkSecretKey) throw new Error("Missing CLERK_SECRET_KEY");
     const adminBase = process.env.ADMIN_APP_URL;
-    if (!adminBase) throw new Error("Missing ADMIN_APP_URL");
+    if (!adminBase) throw new ConvexError("Missing ADMIN_APP_URL");
     const adminAppUrl = adminBase.replace(/\/$/, "") + "/sign-up";
 
     const res = await fetch("https://api.clerk.com/v1/invitations", {
@@ -190,7 +190,7 @@ export const sendAdminInvite = action({
     if (!res.ok) {
       const err = await res.json() as { errors?: { message: string }[] };
       const msg = err.errors?.[0]?.message ?? "Failed to send invite";
-      if (msg.toLowerCase().includes("duplicate")) throw new Error("An invite was already sent to this email. Revoke the existing invite in Clerk first.");
+      if (msg.toLowerCase().includes("duplicate")) throw new ConvexError("An invite was already sent to this email. Revoke the existing invite in Clerk first.");
       throw new Error(msg);
     }
 
@@ -300,7 +300,7 @@ export const expireTrials = internalMutation({
 export const updatePlan = mutation({
   args: {
     orgId: v.id("organizations"),
-    plan: v.union(v.literal("free"), v.literal("pro"), v.literal("enterprise")),
+    plan: v.union(v.literal("free"), v.literal("pro"), v.literal("enterprise"), v.literal("custom")),
     actorClerkId: v.string(), actorName: v.string(),
   },
   handler: async (ctx, { orgId, plan, actorClerkId, actorName }) => {
@@ -320,6 +320,8 @@ export const updateFeatures = mutation({
       schedulingEnabled: v.boolean(), messagingEnabled: v.boolean(),
       analyticsEnabled: v.boolean(), notificationsEnabled: v.boolean(),
       attendanceEnabled: v.boolean(), multiLocationEnabled: v.boolean(),
+      apiAccessEnabled: v.optional(v.boolean()), ssoEnabled: v.optional(v.boolean()),
+      whitelabelEnabled: v.optional(v.boolean()), dedicatedSupportEnabled: v.optional(v.boolean()),
     }),
     actorClerkId: v.string(), actorName: v.string(),
   },
@@ -352,7 +354,7 @@ export const updateOrg = mutation({
       // Two orgs on one slug would send visitors to the wrong organisation.
       const slug = normaliseSlug(fields.slug);
       const clash = await ctx.db.query("organizations").withIndex("by_slug", q => q.eq("slug", slug)).first();
-      if (clash && clash._id !== orgId) throw new Error(`Slug "${slug}" is already taken`);
+      if (clash && clash._id !== orgId) throw new ConvexError(`Slug "${slug}" is already taken`);
       fields.slug = slug;
     }
     const updates: Record<string, any> = {};
@@ -369,9 +371,9 @@ export const deleteOrg = mutation({
   handler: async (ctx, { orgId, actorClerkId, actorName }) => {
     const admin = await requireSuperadmin(ctx);
     const org = await ctx.db.get(orgId);
-    if (!org) throw new Error("Organisation not found");
+    if (!org) throw new ConvexError("Organisation not found");
     // Staff, visits and rooms stay behind, so make the superadmin block it first and think twice.
-    if (org.status !== "blocked") throw new Error("Block the organisation before deleting it");
+    if (org.status !== "blocked") throw new ConvexError("Block the organisation before deleting it");
     await ctx.db.insert("auditLog", { action: "DELETE_ORG", actorClerkId: admin.clerkUserId || actorClerkId, actorName: admin.name || actorName, targetType: "organization", targetId: orgId, targetLabel: org?.name, detail: "Permanently deleted", createdAt: Date.now() });
     await ctx.db.delete(orgId);
   },
@@ -523,9 +525,9 @@ export const savePlatformSettings = mutation({
   },
   handler: async (ctx, { actorClerkId, actorName, ...settings }) => {
     const admin = await requireSuperadmin(ctx);
-    if (!Number.isInteger(settings.trialDays) || settings.trialDays < 1 || settings.trialDays > 365) throw new Error("Trial days must be between 1 and 365");
-    if (settings.annualDiscount < 0 || settings.annualDiscount > 100) throw new Error("Annual discount must be between 0 and 100");
-    if (!Number.isInteger(settings.gracePeriodDays) || settings.gracePeriodDays < 0 || settings.gracePeriodDays > 90) throw new Error("Grace period must be between 0 and 90 days");
+    if (!Number.isInteger(settings.trialDays) || settings.trialDays < 1 || settings.trialDays > 365) throw new ConvexError("Trial days must be between 1 and 365");
+    if (settings.annualDiscount < 0 || settings.annualDiscount > 100) throw new ConvexError("Annual discount must be between 0 and 100");
+    if (!Number.isInteger(settings.gracePeriodDays) || settings.gracePeriodDays < 0 || settings.gracePeriodDays > 90) throw new ConvexError("Grace period must be between 0 and 90 days");
     const existing = await ctx.db.query("platformSettings").first();
     const data = { ...settings, updatedAt: Date.now(), updatedBy: admin.name || actorName };
     if (existing) {
