@@ -247,6 +247,14 @@ export default defineSchema({
     rescheduledFrom: v.optional(v.number()),
     roomId: v.optional(v.id("rooms")),
     orgId: v.optional(v.string()),
+    whatsappStatus: v.optional(v.union(
+      v.literal("sent"),
+      v.literal("delivered"),
+      v.literal("read"),
+      v.literal("failed"),
+      v.literal("replied")
+    )),
+    lastWhatsappWamid: v.optional(v.string()),
   })
     .index("by_status", ["status"])
     .index("by_scheduledDate", ["scheduledDate"])
@@ -407,4 +415,31 @@ export default defineSchema({
     lastSeen: v.number(),
     isTypingTo: v.optional(v.string()),
   }).index("by_clerk", ["clerkUserId"]),
+
+  whatsappMessages: defineTable({
+    visitId: v.optional(v.id("scheduledVisits")),
+    visitorId: v.optional(v.id("visitors")),
+    staffId: v.optional(v.id("staff")),
+    wamid: v.string(),
+    direction: v.union(v.literal("outbound"), v.literal("inbound")),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("sent"),
+      v.literal("delivered"),
+      v.literal("read"),
+      v.literal("failed"),
+      v.literal("replied")
+    ),
+    messageType: v.optional(v.string()), // "visit_request" | "visitor_arrived" | "button_reply" | "text"
+    phoneNumber: v.optional(v.string()),
+    buttonPayload: v.optional(v.string()),
+    text: v.optional(v.string()),
+    errorMessage: v.optional(v.string()),
+    createdAt: v.number(),
+    updatedAt: v.optional(v.number()),
+  })
+    .index("by_wamid", ["wamid"])
+    .index("by_visit", ["visitId"])
+    .index("by_staff", ["staffId"])
+    .index("by_createdAt", ["createdAt"]),
 });

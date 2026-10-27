@@ -9,7 +9,8 @@
   "dependencies": {
     "@convex-dev/auth": "^0.0.92",
     "convex": "^1.37.0",
-    "svix": "^1.92.2"
+    "svix": "^1.92.2",
+    "typescript": "^7.0.2"
   },
   "devDependencies": {
     "@types/node": "^25.6.2"

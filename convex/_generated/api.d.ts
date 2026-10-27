@@ -33,6 +33,8 @@ import type * as staff from "../staff.js";
 import type * as superadmin from "../superadmin.js";
 import type * as users from "../users.js";
 import type * as visitors from "../visitors.js";
+import type * as whatsapp from "../whatsapp.js";
+import type * as whatsappUtils from "../whatsappUtils.js";
 
 import type {
   ApiFromModules,
@@ -66,6 +68,8 @@ declare const fullApi: ApiFromModules<{
   superadmin: typeof superadmin;
   users: typeof users;
   visitors: typeof visitors;
+  whatsapp: typeof whatsapp;
+  whatsappUtils: typeof whatsappUtils;
 }>;
 
 /**

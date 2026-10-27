@@ -387,3 +387,79 @@ export const sendHostCheckInAlert = internalAction({
     return { success: true };
   },
 });
+
+// ── Email 4: Host visit request notification (WhatsApp fallback) ─────────────
+export const sendHostVisitRequestAlert = internalAction({
+  args: {
+    to: v.string(),
+    hostName: v.string(),
+    visitorName: v.string(),
+    visitorCompany: v.optional(v.string()),
+    purpose: v.optional(v.string()),
+    scheduledDate: v.number(),
+    notes: v.optional(v.string()),
+    visitId: v.string(),
+  },
+  handler: async (_ctx, args) => {
+    const apptDate = formatDate(args.scheduledDate);
+    const apptTime = formatTime(args.scheduledDate);
+
+    const visitorLabel = args.visitorCompany
+      ? `${args.visitorName} (${args.visitorCompany})`
+      : args.visitorName;
+
+    const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f6f8fa;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f6f8fa;padding:40px 0;">
+    <tr><td align="center">
+      <table width="580" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #d0d7de;">
+        <tr>
+          <td style="background:#1a1a2e;padding:28px 36px;text-align:center;">
+            <div style="font-size:40px;margin-bottom:8px;">📅</div>
+            <div style="font-size:22px;font-weight:800;color:#ffffff;">New Visit Request</div>
+            <div style="font-size:14px;color:rgba(255,255,255,0.7);margin-top:4px;">Porta Appointment System</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:32px 36px;">
+            <p style="margin:0 0 20px;font-size:16px;color:#1f2328;">Hello <strong>${escapeHtml(args.hostName)}</strong>,</p>
+            <p style="margin:0 0 24px;font-size:16px;color:#1f2328;line-height:1.7;">
+              <strong>${escapeHtml(visitorLabel)}</strong> has requested an appointment with you.
+            </p>
+            <table width="100%" cellpadding="0" cellspacing="0" style="background:#f6f8fa;border-radius:8px;padding:20px;margin-bottom:24px;border:1px solid #e1e4e8;">
+              <tr><td>
+                ${row("👤 Visitor", visitorLabel)}
+                ${row("📅 Date", apptDate)}
+                ${row("⏰ Time", apptTime)}
+                ${args.purpose ? row("📋 Purpose", args.purpose) : ""}
+                ${args.notes ? row("💬 Notes", args.notes) : ""}
+              </td></tr>
+            </table>
+            <p style="margin:0 0 16px;font-size:14px;color:#656d76;line-height:1.6;">
+              Please open the Porta app to review, accept, or reschedule this visit.
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#f6f8fa;padding:18px 36px;border-top:1px solid #d0d7de;text-align:center;">
+            <p style="margin:0;font-size:12px;color:#9ba3ac;">Sent by <strong>Porta</strong> · Visit Management System</p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
+    await sendEmail({
+      to: args.to,
+      subject: `📅 New visit request from ${args.visitorName} for ${apptDate} at ${apptTime}`,
+      html,
+    });
+
+    return { success: true };
+  },
+});

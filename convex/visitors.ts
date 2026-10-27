@@ -145,6 +145,12 @@ export const checkIn = mutation({
       });
     }
 
+    // WhatsApp arrival alert
+    await ctx.scheduler.runAfter(0, internal.whatsapp.sendHostArrivalAlert, {
+      visitorId,
+      now: checkInTime,
+    });
+
     return visitorId;
   },
 });
