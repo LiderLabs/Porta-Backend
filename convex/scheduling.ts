@@ -1,4 +1,4 @@
-import { query, mutation } from "./_generated/server";
+import { query, mutation, internalMutation, internalQuery } from "./_generated/server";
 import type { QueryCtx, MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { api, internal } from "./_generated/api";
@@ -317,12 +317,18 @@ export const create = mutation({
   handler: async (ctx, args) => {
     const { orgId } = await requireAdminOrReceptionist(ctx);
     const { hostStaffId, ...rest } = args;
-    return await ctx.db.insert("scheduledVisits", {
+    const visitId = await ctx.db.insert("scheduledVisits", {
       ...rest,
       hostId: hostStaffId,
       status: "pending",
       orgId,
     });
+
+    if (hostStaffId) {
+      await ctx.scheduler.runAfter(0, internal.whatsapp.sendHostRequest, { visitId });
+    }
+
+    return visitId;
   },
 });
 
@@ -440,6 +446,14 @@ export const publicBook = mutation({
       });
     }
 
+    if (hostStaffId) {
+      if (isWalkIn) {
+        await ctx.scheduler.runAfter(0, internal.whatsapp.sendHostArrivalAlert, { visitId, now });
+      } else {
+        await ctx.scheduler.runAfter(0, internal.whatsapp.sendHostRequest, { visitId });
+      }
+    }
+
     return visitId;
   },
 });
@@ -481,6 +495,57 @@ export const approve = mutation({
   },
 });
 
+/** Internal version of approve (used by WhatsApp reply handler without Clerk login). */
+export const internalApprove = internalMutation({
+  args: {
+    visitId: v.id("scheduledVisits"),
+    actorName: v.string(),
+    source: v.optional(v.string()),
+  },
+  handler: async (ctx, { visitId, actorName, source }) => {
+    const visit = await ctx.db.get(visitId);
+    if (!visit) throw new Error("Visit not found");
+    if (visit.status !== "pending") {
+      return { success: false, reason: `Visit is already ${visit.status}` };
+    }
+
+    await ctx.db.patch(visitId, {
+      status: "approved",
+      approvedAt: Date.now(),
+      approvedBy: actorName,
+      whatsappStatus: source === "whatsapp" ? "replied" : visit.whatsappStatus,
+    });
+
+    if (visit.orgId) {
+      await ctx.db.insert("activityLog", {
+        orgId: visit.orgId,
+        visitId: visit._id,
+        action: "APPROVED",
+        actorName,
+        targetLabel: visit.visitorName,
+        createdAt: Date.now(),
+        detail: source ? `via ${source}` : undefined,
+      });
+    }
+
+    if (visit.visitorEmail) {
+      const host = visit.hostId ? await ctx.db.get(visit.hostId) : null;
+      await ctx.scheduler.runAfter(0, internal.email.sendBookingConfirmed, {
+        to: visit.visitorEmail,
+        visitorName: visit.visitorName,
+        hostName: host?.name ?? undefined,
+        scheduledDate: visit.scheduledDate,
+        purpose: visit.purpose ?? undefined,
+        visitorCompany: visit.visitorCompany ?? undefined,
+        notes: visit.notes ?? undefined,
+        approvedBy: actorName,
+      });
+    }
+
+    return { success: true };
+  },
+});
+
 
 /** Reject a visit (was pending/approved). */
 export const reject = mutation({
@@ -503,6 +568,45 @@ export const reject = mutation({
   },
 });
 
+/** Internal version of reject (used by WhatsApp reply handler without Clerk login). */
+export const internalReject = internalMutation({
+  args: {
+    visitId: v.id("scheduledVisits"),
+    reason: v.optional(v.string()),
+    actorName: v.string(),
+    source: v.optional(v.string()),
+  },
+  handler: async (ctx, { visitId, reason, actorName, source }) => {
+    const visit = await ctx.db.get(visitId);
+    if (!visit) throw new Error("Visit not found");
+    if (visit.status !== "pending" && visit.status !== "approved") {
+      return { success: false, reason: `Visit is already ${visit.status}` };
+    }
+
+    const cancelReason = reason ?? (source === "whatsapp" ? "Declined by host via WhatsApp" : undefined);
+    await ctx.db.patch(visitId, {
+      status: "rejected",
+      cancelReason,
+      cancelledAt: Date.now(),
+      whatsappStatus: source === "whatsapp" ? "replied" : visit.whatsappStatus,
+    });
+
+    if (visit.orgId) {
+      await ctx.db.insert("activityLog", {
+        orgId: visit.orgId,
+        visitId: visit._id,
+        action: "REJECTED",
+        actorName,
+        targetLabel: visit.visitorName,
+        createdAt: Date.now(),
+        detail: cancelReason,
+      });
+    }
+
+    return { success: true };
+  },
+});
+
 
 /** Visitor has arrived at reception — mark checked_in. */
 export const markCheckedIn = mutation({
@@ -518,6 +622,7 @@ export const markCheckedIn = mutation({
 
     // Send smart check-in alert to host
     await sendHostCheckInAlert(ctx, visit, now);
+    await ctx.scheduler.runAfter(0, internal.whatsapp.sendHostArrivalAlert, { visitId, now });
   },
 });
 
@@ -590,6 +695,50 @@ export const reschedule = mutation({
       rescheduledFrom: existing.scheduledDate,
     });
     await logActivity(ctx, auth, existing, "RESCHEDULED", { fromDate: existing.scheduledDate, toDate: scheduledDate });
+  },
+});
+
+/** Internal version of reschedule (used by WhatsApp reply handler). */
+export const internalReschedule = internalMutation({
+  args: {
+    visitId: v.id("scheduledVisits"),
+    scheduledDate: v.number(),
+    duration: v.optional(v.number()),
+    notes: v.optional(v.string()),
+    actorName: v.string(),
+    source: v.optional(v.string()),
+  },
+  handler: async (ctx, { visitId, scheduledDate, duration, notes, actorName, source }) => {
+    const existing = await ctx.db.get(visitId);
+    if (!existing) throw new Error("Visit not found");
+    if (existing.status === "cancelled" || existing.status === "completed" || existing.status === "rejected") {
+      return { success: false, reason: `Visit is already ${existing.status}` };
+    }
+
+    await ctx.db.patch(visitId, {
+      scheduledDate,
+      duration: duration ?? existing.duration,
+      notes: notes ?? existing.notes,
+      status: "pending",
+      rescheduledFrom: existing.scheduledDate,
+      whatsappStatus: source === "whatsapp" ? "replied" : existing.whatsappStatus,
+    });
+
+    if (existing.orgId) {
+      await ctx.db.insert("activityLog", {
+        orgId: existing.orgId,
+        visitId: existing._id,
+        action: "RESCHEDULED",
+        actorName,
+        targetLabel: existing.visitorName,
+        createdAt: Date.now(),
+        fromDate: existing.scheduledDate,
+        toDate: scheduledDate,
+        detail: source ? `via ${source}` : undefined,
+      });
+    }
+
+    return { success: true };
   },
 });
 
@@ -876,7 +1025,7 @@ export const createByStaff = mutation({
     const { orgId } = await requireStaffMember(ctx);
     const { hostStaffId, ...rest } = args;
     if (hostStaffId) await loadStaffInOrg(ctx, hostStaffId, orgId);
-    return await ctx.db.insert("scheduledVisits", {
+    const visitId = await ctx.db.insert("scheduledVisits", {
       ...rest,
       hostId: hostStaffId,
       status: "approved",
@@ -885,6 +1034,12 @@ export const createByStaff = mutation({
       source: "staff",
       orgId,
     });
+
+    if (hostStaffId) {
+      await ctx.scheduler.runAfter(0, internal.whatsapp.sendHostRequest, { visitId });
+    }
+
+    return visitId;
   },
 });
 

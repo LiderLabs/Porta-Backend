@@ -85,4 +85,57 @@ http.route({
   }),
 });
 
+// ── WhatsApp Webhook: Verification (GET) ──────────────────────────────────────
+http.route({
+  path: "/whatsapp",
+  method: "GET",
+  handler: httpAction(async (_ctx, request) => {
+    const url = new URL(request.url);
+    const mode = url.searchParams.get("hub.mode");
+    const token = url.searchParams.get("hub.verify_token");
+    const challenge = url.searchParams.get("hub.challenge");
+
+    const configuredVerifyToken = process.env.WA_VERIFY_TOKEN;
+
+    if (mode === "subscribe" && token && token === configuredVerifyToken) {
+      console.log("[WhatsApp Webhook] Verification challenge passed.");
+      return new Response(challenge ?? "", {
+        status: 200,
+        headers: { "Content-Type": "text/plain" },
+      });
+    }
+
+    console.warn("[WhatsApp Webhook] Verification failed. Invalid verify_token or mode.");
+    return new Response("Forbidden", { status: 403 });
+  }),
+});
+
+// ── WhatsApp Webhook: Inbound Messages & Status Updates (POST) ────────────────
+http.route({
+  path: "/whatsapp",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const rawBody = await request.text();
+    const signatureHeader = request.headers.get("x-hub-signature-256");
+    const appSecret = process.env.WA_APP_SECRET;
+
+    // Verify HMAC-SHA256 signature when WA_APP_SECRET is configured
+    if (appSecret) {
+      const { verifyMetaSignature } = await import("./whatsappUtils");
+      const isValid = await verifyMetaSignature(rawBody, signatureHeader, appSecret);
+      if (!isValid) {
+        console.warn("[WhatsApp Webhook] Invalid X-Hub-Signature-256 rejected.");
+        return new Response("Invalid signature", { status: 401 });
+      }
+    }
+
+    // Heavy work is offloaded to the background scheduler to respond with 200 immediately
+    await ctx.scheduler.runAfter(0, internal.whatsapp.processIncomingWebhook, {
+      rawBody,
+    });
+
+    return new Response("OK", { status: 200 });
+  }),
+});
+
 export default http;
